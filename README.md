@@ -87,6 +87,9 @@ This creates:
 2. Choose sample-rate mode (Native or Forced 48 kHz).
 3. Choose codec A/B and bitrates.
   - You can choose **Lossless (Unprocessed Reference)** as either A or B.
+  - Choose **A/B label mapping** mode:
+    - Fixed labels: Play A is Codec A, Play B is Codec B.
+    - Blinded labels: Play A/B mapping is randomized each session.
 4. Click **Preprocess A/B** and verify status metrics.
   - Use **Cancel Preprocess** to stop preprocessing while ffmpeg jobs are running.
 5. Select output device (enable exclusive mode if desired).

@@ -30,3 +30,4 @@ exports/
 # OS files
 .DS_Store
 Thumbs.db
+run_abx.spec

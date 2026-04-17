@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import random
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -97,6 +98,8 @@ class MainWindow(QMainWindow):
         self.prepare_thread: Optional[QThread] = None
         self.prepare_worker: Optional[PrepareWorker] = None
         self._active_stamp: Optional[str] = None
+        self._mapping_mode_pending: str = "fixed"
+        self._display_to_source = {"A": "A", "B": "B"}
 
         self._build_ui()
 
@@ -180,6 +183,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.codec_b, 1, 1)
         layout.addWidget(QLabel("Bitrate B"), 1, 2)
         layout.addWidget(self.br_b, 1, 3)
+
+        self.ab_mapping_mode = QComboBox()
+        self.ab_mapping_mode.addItem("Fixed labels (Play A=Codec A, Play B=Codec B)", "fixed")
+        self.ab_mapping_mode.addItem("Blinded labels (Play A/B randomized per session)", "blind_random")
+
+        layout.addWidget(QLabel("A/B label mapping"), 2, 0)
+        layout.addWidget(self.ab_mapping_mode, 2, 1, 1, 3)
         return g
 
     def _build_output_group(self) -> QGroupBox:
@@ -338,6 +348,7 @@ class MainWindow(QMainWindow):
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._active_stamp = stamp
+        self._mapping_mode_pending = str(self.ab_mapping_mode.currentData())
         work_dir = Path("sessions") / f"session_{stamp}"
 
         self._set_status("preprocessing and validating A/B...")
@@ -379,8 +390,11 @@ class MainWindow(QMainWindow):
         self.prepared_session = prepared
         self.player.load_buffers(arr_a, arr_b, prepared.target_sample_rate)
 
+        mapping_mode = self._mapping_mode_pending
+        self._configure_display_mapping(mapping_mode)
+
         self.engine = ABXEngine()
-        self.player.set_x_mapping(self.engine.current_x_is)
+        self._sync_player_x_mapping()
 
         self.logger = ExperimentLogger()
         self.logger.set_session_info(
@@ -394,6 +408,8 @@ class MainWindow(QMainWindow):
                 "codec_b": prepared.track_b.codec_name,
                 "bitrate_a_kbps": prepared.track_a.bitrate_kbps,
                 "bitrate_b_kbps": prepared.track_b.bitrate_kbps,
+                "ab_label_mapping_mode": mapping_mode,
+                "ab_label_mapping": dict(self._display_to_source),
                 "validation": asdict(prepared.validation),
                 "track_a": asdict(prepared.track_a),
                 "track_b": asdict(prepared.track_b),
@@ -408,7 +424,31 @@ class MainWindow(QMainWindow):
             f"ready | sr={prepared.target_sample_rate} Hz | duration={prepared.duration_seconds:.2f}s | "
             f"loudness_diff={validation.loudness_diff_db:.3f} dB | lag={validation.alignment_lag_samples} samples"
         )
+        if mapping_mode == "fixed":
+            msg += " | labels=fixed"
+        else:
+            msg += " | labels=blinded"
         self._set_status(msg)
+
+    def _configure_display_mapping(self, mapping_mode: str) -> None:
+        if mapping_mode == "blind_random":
+            if random.SystemRandom().random() < 0.5:
+                self._display_to_source = {"A": "A", "B": "B"}
+            else:
+                self._display_to_source = {"A": "B", "B": "A"}
+            return
+        self._display_to_source = {"A": "A", "B": "B"}
+
+    def _resolve_display_source(self, display_label: str) -> str:
+        label = display_label.strip().upper()
+        if label not in ("A", "B"):
+            return label
+        return self._display_to_source[label]
+
+    def _sync_player_x_mapping(self) -> None:
+        x_display = self.engine.current_x_is
+        x_source = self._resolve_display_source(x_display)
+        self.player.set_x_mapping(x_source)
 
     def _on_prepare_failed(self, error_text: str) -> None:
         QMessageBox.critical(self, "Preparation failed", error_text)
@@ -444,7 +484,8 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.player.set_active_source(source)
+            resolved = self._resolve_display_source(source)
+            self.player.set_active_source(resolved)
             self._start_stream_if_needed()
         except Exception as exc:
             QMessageBox.critical(self, "Playback error", str(exc))
@@ -506,7 +547,7 @@ class MainWindow(QMainWindow):
             )
         )
 
-        self.player.set_x_mapping(self.engine.current_x_is)
+        self._sync_player_x_mapping()
         self._update_score_ui()
 
     def on_cancel_session(self) -> None:
@@ -514,7 +555,7 @@ class MainWindow(QMainWindow):
         self.player.set_position_seconds(0.0)
 
         self.engine = ABXEngine()
-        self.player.set_x_mapping(self.engine.current_x_is)
+        self._sync_player_x_mapping()
 
         self.logger = ExperimentLogger()
         if self.prepared_session is not None:
@@ -528,6 +569,8 @@ class MainWindow(QMainWindow):
                     "codec_b": self.prepared_session.track_b.codec_name,
                     "bitrate_a_kbps": self.prepared_session.track_a.bitrate_kbps,
                     "bitrate_b_kbps": self.prepared_session.track_b.bitrate_kbps,
+                    "ab_label_mapping_mode": self._mapping_mode_pending,
+                    "ab_label_mapping": dict(self._display_to_source),
                     "validation": asdict(self.prepared_session.validation),
                     "track_a": asdict(self.prepared_session.track_a),
                     "track_b": asdict(self.prepared_session.track_b),

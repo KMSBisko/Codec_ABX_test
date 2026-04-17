@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -50,11 +52,52 @@ class AudioPipeline:
     def _reset_cancel(self) -> None:
         self._cancel_requested = False
 
+    @staticmethod
+    def _packaged_root() -> Optional[Path]:
+        frozen_root = getattr(sys, "_MEIPASS", None)
+        if frozen_root:
+            return Path(str(frozen_root))
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        return None
+
+    def _resolve_binary(self, configured: str, candidates: List[str]) -> Optional[str]:
+        configured_path = Path(configured)
+        if configured_path.is_file():
+            return str(configured_path)
+
+        by_path = shutil.which(configured)
+        if by_path:
+            return by_path
+
+        roots: List[Path] = []
+        packaged_root = self._packaged_root()
+        if packaged_root is not None:
+            roots.append(packaged_root)
+
+        cwd = Path(os.getcwd())
+        roots.append(cwd)
+        roots.append(cwd / "bin")
+
+        for root in roots:
+            for name in candidates:
+                candidate = root / name
+                if candidate.is_file():
+                    return str(candidate)
+
+        return None
+
     def check_binaries(self) -> None:
-        if shutil.which(self.ffmpeg_bin) is None:
-            raise PipelineError("ffmpeg is not available on PATH")
-        if shutil.which(self.ffprobe_bin) is None:
-            raise PipelineError("ffprobe is not available on PATH")
+        ffmpeg_resolved = self._resolve_binary(self.ffmpeg_bin, ["ffmpeg.exe", "ffmpeg"])
+        ffprobe_resolved = self._resolve_binary(self.ffprobe_bin, ["ffprobe.exe", "ffprobe"])
+
+        if ffmpeg_resolved is None:
+            raise PipelineError("ffmpeg not found (PATH or bundled app binary)")
+        if ffprobe_resolved is None:
+            raise PipelineError("ffprobe not found (PATH or bundled app binary)")
+
+        self.ffmpeg_bin = ffmpeg_resolved
+        self.ffprobe_bin = ffprobe_resolved
 
     def _run(self, args: List[str]) -> None:
         with self._proc_lock:

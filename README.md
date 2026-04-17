@@ -74,6 +74,28 @@ pip install -r requirements.txt
 python run_abx.py
 ```
 
+## Build A Single Windows EXE (No Python Needed For End Users)
+
+This project includes a PyInstaller setup for a one-file GUI executable.
+
+1. Put ffmpeg binaries in:
+  - `third_party/ffmpeg/bin/ffmpeg.exe`
+  - `third_party/ffmpeg/bin/ffprobe.exe`
+
+2. Build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/build_windows_exe.ps1
+```
+
+3. Share this file with users:
+  - `dist/run_abx.exe`
+
+Notes:
+- End users do not need Python installed.
+- On first launch, some antivirus tools may scan the self-extracting exe.
+- If SmartScreen warns on unsigned apps, users may need to click "More info" -> "Run anyway".
+
 ## Example Test File Included
 
 Generate bundled example input:

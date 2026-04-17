@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSlider,
     QSpinBox,
@@ -100,6 +101,10 @@ class MainWindow(QMainWindow):
         self._active_stamp: Optional[str] = None
         self._mapping_mode_pending: str = "fixed"
         self._display_to_source = {"A": "A", "B": "B"}
+        self._blind_same_mapping_streak = 0
+        self._blind_base_swap_probability = 0.5
+        self._blind_streak_probability_step = 0.07
+        self._blind_max_swap_probability = 0.88
 
         self._build_ui()
 
@@ -119,6 +124,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self._build_output_group())
         main_layout.addWidget(self._build_playback_group())
         main_layout.addWidget(self._build_abx_group())
+        main_layout.addWidget(self._build_diagnostics_group())
 
         self.status_label = QLabel("Status: idle")
         self.status_label.setWordWrap(True)
@@ -289,6 +295,27 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.cancel_session_btn, 2, 2)
         return g
 
+    def _build_diagnostics_group(self) -> QGroupBox:
+        g = QGroupBox("6) Post-Session Diagnostics")
+        layout = QVBoxLayout(g)
+
+        row = QHBoxLayout()
+        self.refresh_diag_btn = QPushButton("Show/Refresh Diagnostics")
+        self.refresh_diag_btn.clicked.connect(self._refresh_diagnostics_panel)
+        row.addWidget(self.refresh_diag_btn)
+        row.addStretch(1)
+
+        self.diagnostics_view = QPlainTextEdit()
+        self.diagnostics_view.setReadOnly(True)
+        self.diagnostics_view.setPlaceholderText(
+            "Diagnostics will appear here after preprocessing/trials."
+        )
+        self.diagnostics_view.setMinimumHeight(170)
+
+        layout.addLayout(row)
+        layout.addWidget(self.diagnostics_view)
+        return g
+
     def _refresh_bitrate_a(self) -> None:
         cid = self.codec_a.currentData()
         self.br_a.clear()
@@ -429,6 +456,7 @@ class MainWindow(QMainWindow):
         else:
             msg += " | labels=blinded"
         self._set_status(msg)
+        self._refresh_diagnostics_panel()
 
     def _configure_display_mapping(self, mapping_mode: str) -> None:
         if mapping_mode == "blind_random":
@@ -436,8 +464,37 @@ class MainWindow(QMainWindow):
                 self._display_to_source = {"A": "A", "B": "B"}
             else:
                 self._display_to_source = {"A": "B", "B": "A"}
+            self._blind_same_mapping_streak = 0
             return
         self._display_to_source = {"A": "A", "B": "B"}
+        self._blind_same_mapping_streak = 0
+
+    def _advance_blind_mapping_if_needed(self) -> bool:
+        # In blind mode, randomize label mapping after each completed trial.
+        if self._mapping_mode_pending != "blind_random":
+            return False
+
+        prev = dict(self._display_to_source)
+
+        # Start near true-random 50/50 and only bias toward swap gradually
+        # as the no-change streak grows.
+        swap_probability = min(
+            self._blind_base_swap_probability
+            + (self._blind_streak_probability_step * self._blind_same_mapping_streak),
+            self._blind_max_swap_probability,
+        )
+        swap = random.SystemRandom().random() < swap_probability
+        if swap:
+            self._display_to_source = {"A": prev["B"], "B": prev["A"]}
+        else:
+            self._display_to_source = dict(prev)
+
+        changed = self._display_to_source != prev
+        if changed:
+            self._blind_same_mapping_streak = 0
+        else:
+            self._blind_same_mapping_streak += 1
+        return changed
 
     def _resolve_display_source(self, display_label: str) -> str:
         label = display_label.strip().upper()
@@ -534,7 +591,12 @@ class MainWindow(QMainWindow):
             return
 
         x_is_before = self.engine.current_x_is
+        mapping_before = dict(self._display_to_source)
+        x_source_before = self._resolve_display_source(x_is_before)
+        answer_source_before = self._resolve_display_source(answer)
         correct = self.engine.submit_answer(answer)
+
+        mapping_changed = self._advance_blind_mapping_if_needed()
 
         stats = self.engine.stats()
         self.logger.add_trial(
@@ -544,11 +606,17 @@ class MainWindow(QMainWindow):
                 answer=answer,
                 correct=correct,
                 timestamp_utc=self.logger.utc_now_iso(),
+                mapping_a_to=mapping_before.get("A"),
+                mapping_b_to=mapping_before.get("B"),
+                x_source=x_source_before,
+                answer_source=answer_source_before,
+                mapping_changed_for_next_trial=mapping_changed,
             )
         )
 
         self._sync_player_x_mapping()
         self._update_score_ui()
+        self._refresh_diagnostics_panel()
 
     def on_cancel_session(self) -> None:
         self.player.stop()
@@ -579,6 +647,69 @@ class MainWindow(QMainWindow):
 
         self._update_score_ui()
         self._set_status("ABX session cancelled and reset")
+        self._refresh_diagnostics_panel()
+
+    def _refresh_diagnostics_panel(self) -> None:
+        if self.prepared_session is None:
+            self.diagnostics_view.setPlainText("No prepared session yet.")
+            return
+
+        stats = self.engine.stats()
+        mapping_mode = "fixed" if self._mapping_mode_pending == "fixed" else "blind_random"
+        mapping_desc = f"A->{self._display_to_source['A']} | B->{self._display_to_source['B']}"
+
+        lines = [
+            "Session Summary",
+            f"Input: {self.prepared_session.input_file}",
+            f"Mode: {self.prepared_session.mode.value}",
+            f"Target SR: {self.prepared_session.target_sample_rate} Hz",
+            f"Codec A: {self.prepared_session.track_a.codec_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps",
+            f"Codec B: {self.prepared_session.track_b.codec_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps",
+            f"A/B Label Mapping Mode: {mapping_mode}",
+            f"A/B Label Mapping: {mapping_desc}",
+            f"Trials: {stats.total_trials}",
+            f"Correct: {stats.correct_trials}",
+            f"p-value (one-tailed): {stats.p_value_one_tailed:.6f}",
+            "",
+            "Trial Details",
+        ]
+
+        if not self.logger.trials:
+            lines.append("(no trial answers submitted yet)")
+        else:
+            for trial in self.logger.trials:
+                if trial.x_source is not None:
+                    x_source = trial.x_source
+                else:
+                    x_source = self._resolve_display_source(trial.x_is)
+
+                if trial.answer_source is not None:
+                    answer_source = trial.answer_source
+                else:
+                    answer_source = self._resolve_display_source(trial.answer)
+
+                trial_mapping = ""
+                if trial.mapping_a_to and trial.mapping_b_to:
+                    trial_mapping = f" | Mapping(A->{trial.mapping_a_to}, B->{trial.mapping_b_to})"
+
+                next_trial_note = ""
+                if trial.mapping_changed_for_next_trial is not None:
+                    next_trial_note = (
+                        " | NextTrialMappingChanged="
+                        + ("Yes" if trial.mapping_changed_for_next_trial else "No")
+                    )
+
+                lines.append(
+                    "#"
+                    + str(trial.trial_index)
+                    + f" | X label={trial.x_is} (source={x_source})"
+                    + f" | Answer={trial.answer} (source={answer_source})"
+                    + f" | Correct={trial.correct}"
+                    + trial_mapping
+                    + next_trial_note
+                )
+
+        self.diagnostics_view.setPlainText("\n".join(lines))
 
     def _update_score_ui(self) -> None:
         s = self.engine.stats()

@@ -44,6 +44,10 @@ Simulated Bluetooth labels (implemented through available codecs/bitrates):
 - Simulated aptX HD
 - Simulated LDAC
 
+Additional bitrate notes:
+- Lower bitrate options are available for direct codecs (Opus/AAC/SBC) to stress-test artifact audibility.
+- Simulated LDAC now uses AAC at 330/660/990 kbps for more reliable high-bitrate preprocessing across ffmpeg builds.
+
 ## Prerequisites
 
 1. Python 3.11+
@@ -89,13 +93,18 @@ This creates:
   - You can choose **Lossless (Unprocessed Reference)** as either A or B.
   - Choose **A/B label mapping** mode:
     - Fixed labels: Play A is Codec A, Play B is Codec B.
-    - Blinded labels: Play A/B mapping is randomized each session.
+    - Blinded labels: Play A/B mapping is randomized each trial (may stay same or swap).
+      To reduce deterministic behavior, swap probability increases gradually with no-change streak length.
 4. Click **Preprocess A/B** and verify status metrics.
   - Use **Cancel Preprocess** to stop preprocessing while ffmpeg jobs are running.
 5. Select output device (enable exclusive mode if desired).
 6. Perform ABX trials with Play A/B/X and answer X=A or X=B.
   - Use **Cancel ABX Session** to reset trial state and score.
-7. Export results as JSON/CSV.
+7. Use **Show/Refresh Diagnostics** to review in-app post-session details:
+  - A/B label mapping mode and actual session mapping
+  - Trial-by-trial X label/source, answer label/source, and correctness
+  - Whether mapping changed for the next trial
+8. Export results as JSON/CSV.
 
 ## Notes On Experimental Validity
 

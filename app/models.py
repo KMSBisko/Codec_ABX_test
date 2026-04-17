@@ -72,6 +72,11 @@ class TrialResult:
     answer: str
     correct: bool
     timestamp_utc: str
+    mapping_a_to: Optional[str] = None
+    mapping_b_to: Optional[str] = None
+    x_source: Optional[str] = None
+    answer_source: Optional[str] = None
+    mapping_changed_for_next_trial: Optional[bool] = None
 
 
 def codec_catalog() -> Dict[str, CodecProfile]:
@@ -89,7 +94,7 @@ def codec_catalog() -> Dict[str, CodecProfile]:
             display_name="Opus",
             ffmpeg_encoder="libopus",
             container_ext="opus",
-            bitrate_options_kbps=[64, 96, 128, 160, 192, 256, 320],
+            bitrate_options_kbps=[16, 24, 32, 48, 64, 96, 128, 160, 192, 256, 320],
             ffmpeg_extra_args=["-vbr", "off"],
         ),
         "aac": CodecProfile(
@@ -97,14 +102,14 @@ def codec_catalog() -> Dict[str, CodecProfile]:
             display_name="AAC",
             ffmpeg_encoder="aac",
             container_ext="m4a",
-            bitrate_options_kbps=[96, 128, 160, 192, 256, 320],
+            bitrate_options_kbps=[48, 64, 80, 96, 128, 160, 192, 256, 320],
         ),
         "sbc": CodecProfile(
             codec_id="sbc",
             display_name="SBC",
             ffmpeg_encoder="sbc",
             container_ext="sbc",
-            bitrate_options_kbps=[192, 256, 320],
+            bitrate_options_kbps=[96, 128, 160, 192, 256, 320],
             ffmpeg_extra_args=["-f", "sbc"],
         ),
         "sim_aptx": CodecProfile(
@@ -112,7 +117,7 @@ def codec_catalog() -> Dict[str, CodecProfile]:
             display_name="AAC",
             ffmpeg_encoder="aac",
             container_ext="m4a",
-            bitrate_options_kbps=[320, 352],
+            bitrate_options_kbps=[256, 320, 352],
             simulated_label="Simulated aptX",
         ),
         "sim_aptx_hd": CodecProfile(
@@ -120,16 +125,15 @@ def codec_catalog() -> Dict[str, CodecProfile]:
             display_name="AAC",
             ffmpeg_encoder="aac",
             container_ext="m4a",
-            bitrate_options_kbps=[512, 576],
+            bitrate_options_kbps=[384, 512, 576],
             simulated_label="Simulated aptX HD",
         ),
         "sim_ldac": CodecProfile(
             codec_id="sim_ldac",
-            display_name="Opus",
-            ffmpeg_encoder="libopus",
-            container_ext="opus",
-            bitrate_options_kbps=[660, 990],
+            display_name="AAC",
+            ffmpeg_encoder="aac",
+            container_ext="m4a",
+            bitrate_options_kbps=[330, 660, 990],
             simulated_label="Simulated LDAC",
-            ffmpeg_extra_args=["-vbr", "off"],
         ),
     }

@@ -96,6 +96,11 @@ Notes:
 - On first launch, some antivirus tools may scan the self-extracting exe.
 - If SmartScreen warns on unsigned apps, users may need to click "More info" -> "Run anyway".
 
+Build troubleshooting:
+- Run the build from a normal (non-admin) terminal.
+- If you previously hit `PermissionError` in `build/run_abx/...`, close any app/process that may lock files (Explorer preview, antivirus scan in progress), then run the build script again.
+- The script now uses a fresh PyInstaller work folder each run to avoid stale lock issues.
+
 ## Example Test File Included
 
 Generate bundled example input:

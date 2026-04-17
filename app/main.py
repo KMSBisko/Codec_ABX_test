@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import sys
 import random
+import shutil
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,14 @@ from .audio_pipeline import AudioPipeline, PipelineCancelled, PipelineError
 from .logger import ExperimentLogger
 from .models import SampleRateMode, TrialResult, codec_catalog
 from .player import SynchronizedABXPlayer, format_device_label
+
+
+# Session retention knobs (easy to tune):
+# - keep at most N newest session folders
+# - delete any session folder older than SESSION_MAX_AGE
+SESSION_ROOT = Path("sessions")
+SESSION_MAX_KEEP = 8
+SESSION_MAX_AGE = timedelta(days=1)
 
 
 class PrepareWorker(QObject):
@@ -113,6 +122,7 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self._refresh_transport)
         self.timer.start()
 
+        self._prune_session_folders()
         self._load_devices()
 
     def _build_ui(self) -> None:
@@ -357,6 +367,28 @@ class MainWindow(QMainWindow):
     def _set_status(self, text: str) -> None:
         self.status_label.setText(f"Status: {text}")
 
+    def _prune_session_folders(self) -> None:
+        if not SESSION_ROOT.exists():
+            return
+
+        now = datetime.now(timezone.utc)
+        dirs = [d for d in SESSION_ROOT.iterdir() if d.is_dir()]
+
+        # Remove expired sessions first.
+        for d in dirs:
+            try:
+                mtime = datetime.fromtimestamp(d.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                continue
+            if now - mtime > SESSION_MAX_AGE:
+                shutil.rmtree(d, ignore_errors=True)
+
+        # Keep only the newest N sessions.
+        remaining = [d for d in SESSION_ROOT.iterdir() if d.is_dir()]
+        remaining.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for old_dir in remaining[SESSION_MAX_KEEP:]:
+            shutil.rmtree(old_dir, ignore_errors=True)
+
     def on_prepare(self) -> None:
         if self.prepare_thread is not None:
             QMessageBox.information(self, "Already running", "Preprocessing is already running.")
@@ -376,7 +408,9 @@ class MainWindow(QMainWindow):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._active_stamp = stamp
         self._mapping_mode_pending = str(self.ab_mapping_mode.currentData())
-        work_dir = Path("sessions") / f"session_{stamp}"
+        self._prune_session_folders()
+        SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+        work_dir = SESSION_ROOT / f"session_{stamp}"
 
         self._set_status("preprocessing and validating A/B...")
         self.prepare_btn.setEnabled(False)

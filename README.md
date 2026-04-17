@@ -141,10 +141,20 @@ This creates:
 - Use wired output or known stable exclusive-mode path when possible.
 - A/B/X are rendered offline before trials to reduce runtime variability.
 
-## Quick Test
+## Session Retention
+
+The app auto-prunes local session folders under `sessions/`:
+- Deletes session folders older than 1 day
+- Keeps only the newest N session folders
+
+You can tune this in code:
+- `SESSION_MAX_KEEP`
+- `SESSION_MAX_AGE`
+
+See `app/main.py`.
+
+## Quick Check
 
 ```powershell
-python -m pytest -q
+python -m compileall app run_abx.py
 ```
-
-(Requires `pytest`; install with `pip install pytest`.)

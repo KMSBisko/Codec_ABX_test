@@ -10,6 +10,11 @@ class SampleRateMode(str, Enum):
     FORCE_48K = "force_48k"
 
 
+class ProcessingMode(str, Enum):
+    SINGLE_STAGE = "single_stage"
+    CASCADED_PIPELINE = "cascaded_pipeline"
+
+
 @dataclass(frozen=True)
 class CodecProfile:
     codec_id: str
@@ -20,6 +25,7 @@ class CodecProfile:
     simulated_label: Optional[str] = None
     ffmpeg_extra_args: List[str] = field(default_factory=list)
     passthrough_unprocessed: bool = False
+    pipeline_noop: bool = False
 
     @property
     def ui_name(self) -> str:
@@ -39,6 +45,25 @@ class PreparedTrack:
     encoded_path: str
     loudness_lufs: float
     true_peak_dbfs: float
+    stages: List["PipelineStageResult"] = field(default_factory=list)
+
+
+@dataclass
+class PipelineStageConfig:
+    codec_id: str
+    bitrate_kbps: int
+
+
+@dataclass
+class PipelineStageResult:
+    stage_index: int
+    codec_id: str
+    codec_name: str
+    bitrate_kbps: int
+    sample_rate_in: int
+    sample_rate_out: int
+    encoded_path: str
+    decoded_path: str
 
 
 @dataclass
@@ -58,11 +83,18 @@ class PreparedSession:
     original_sample_rate: int
     target_sample_rate: int
     mode: SampleRateMode
+    processing_mode: ProcessingMode
     duration_seconds: float
     channels: int
+    pipeline_stage_count_a: int
+    pipeline_stage_count_b: int
     track_a: PreparedTrack
     track_b: PreparedTrack
     validation: SessionValidation
+    bandwidth_limit_a_enabled: bool = False
+    bandwidth_limit_a_hz: Optional[int] = None
+    bandwidth_limit_b_enabled: bool = False
+    bandwidth_limit_b_hz: Optional[int] = None
 
 
 @dataclass
@@ -88,6 +120,14 @@ def codec_catalog() -> Dict[str, CodecProfile]:
             container_ext="wav",
             bitrate_options_kbps=[0],
             passthrough_unprocessed=True,
+        ),
+        "noop_passthrough": CodecProfile(
+            codec_id="noop_passthrough",
+            display_name="No-op / Lossless passthrough",
+            ffmpeg_encoder="pcm_s16le",
+            container_ext="wav",
+            bitrate_options_kbps=[0],
+            pipeline_noop=True,
         ),
         "opus": CodecProfile(
             codec_id="opus",

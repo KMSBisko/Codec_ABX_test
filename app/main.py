@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 from .abx_engine import ABXEngine
 from .audio_pipeline import AudioPipeline, PipelineCancelled, PipelineError
 from .logger import ExperimentLogger
-from .models import SampleRateMode, TrialResult, codec_catalog
+from .models import PipelineStageConfig, ProcessingMode, SampleRateMode, TrialResult, codec_catalog
 from .player import SynchronizedABXPlayer, format_device_label
 
 
@@ -55,11 +55,27 @@ TRANSLATIONS = {
         "browse": "Browse",
         "audio_file": "Audio file",
         "sample_rate_mode": "Sample-rate mode",
+        "processing_mode": "Mode",
+        "mode_single": "Single-stage ABX",
+        "mode_cascaded": "Cascaded Pipeline ABX",
         "sr_native": "Native sample rate (default)",
         "sr_force_48k": "Force 48 kHz (Bluetooth simulation)",
         "prepare": "Preprocess A/B",
         "cancel_prepare": "Cancel Preprocess",
         "group_codec": "2) Codec Profiles",
+        "pipeline_stages": "Pipeline stages",
+        "stage_count": "Stage count",
+        "stage_count_a": "Stage count A",
+        "stage_count_b": "Stage count B",
+        "stage_codec": "Codec",
+        "stage_bitrate": "Bitrate",
+        "side_a": "Side A",
+        "side_b": "Side B",
+        "stage_label": "Stage",
+        "bandwidth_limit_a": "Enable bandwidth limit A",
+        "bandwidth_limit_b": "Enable bandwidth limit B",
+        "bandwidth_cutoff_a": "Cutoff A",
+        "bandwidth_cutoff_b": "Cutoff B",
         "codec_a": "Codec A",
         "codec_b": "Codec B",
         "bitrate_a": "Bitrate A",
@@ -124,6 +140,15 @@ TRANSLATIONS = {
         "diag_trials": "Trials",
         "diag_correct": "Correct",
         "diag_trial_details": "Trial Details",
+        "diag_processing_mode": "Processing mode",
+        "diag_pipeline_stages_a": "Pipeline stages A",
+        "diag_pipeline_stages_b": "Pipeline stages B",
+        "diag_bandwidth_limit_a": "Bandwidth limit A",
+        "diag_bandwidth_cutoff_a": "Bandwidth cutoff A",
+        "diag_bandwidth_limit_b": "Bandwidth limit B",
+        "diag_bandwidth_cutoff_b": "Bandwidth cutoff B",
+        "diag_pipeline_a_stages": "Pipeline A stages",
+        "diag_pipeline_b_stages": "Pipeline B stages",
         "diag_no_trials": "(no trial answers submitted yet)",
         "diag_mapping_audit": "--- Mapping Audit (Scroll Down To Reveal) ---",
         "diag_current_mapping": "Current Mapping",
@@ -140,11 +165,27 @@ TRANSLATIONS = {
         "browse": "Chọn file",
         "audio_file": "Tệp âm thanh",
         "sample_rate_mode": "Chế độ tần số lấy mẫu",
+        "processing_mode": "Chế độ",
+        "mode_single": "ABX một tầng",
+        "mode_cascaded": "ABX pipeline nhiều tầng",
         "sr_native": "Giữ tần số gốc (mặc định)",
         "sr_force_48k": "Ép 48 kHz (mô phỏng Bluetooth)",
         "prepare": "Tiền xử lý A/B",
         "cancel_prepare": "Hủy tiền xử lý",
         "group_codec": "2) Cấu hình Codec",
+        "pipeline_stages": "Các tầng pipeline",
+        "stage_count": "Số tầng",
+        "stage_count_a": "Số tầng A",
+        "stage_count_b": "Số tầng B",
+        "stage_codec": "Codec",
+        "stage_bitrate": "Bitrate",
+        "side_a": "Nhánh A",
+        "side_b": "Nhánh B",
+        "stage_label": "Tầng",
+        "bandwidth_limit_a": "Bật giới hạn băng thông A",
+        "bandwidth_limit_b": "Bật giới hạn băng thông B",
+        "bandwidth_cutoff_a": "Điểm cắt A",
+        "bandwidth_cutoff_b": "Điểm cắt B",
         "codec_a": "Codec A",
         "codec_b": "Codec B",
         "bitrate_a": "Bitrate A",
@@ -209,6 +250,15 @@ TRANSLATIONS = {
         "diag_trials": "Số lượt",
         "diag_correct": "Đúng",
         "diag_trial_details": "Chi tiết lượt",
+        "diag_processing_mode": "Chế độ xử lý",
+        "diag_pipeline_stages_a": "Số tầng pipeline A",
+        "diag_pipeline_stages_b": "Số tầng pipeline B",
+        "diag_bandwidth_limit_a": "Giới hạn băng thông A",
+        "diag_bandwidth_cutoff_a": "Điểm cắt A",
+        "diag_bandwidth_limit_b": "Giới hạn băng thông B",
+        "diag_bandwidth_cutoff_b": "Điểm cắt B",
+        "diag_pipeline_a_stages": "Các tầng pipeline A",
+        "diag_pipeline_b_stages": "Các tầng pipeline B",
         "diag_no_trials": "(chưa có lượt trả lời nào)",
         "diag_mapping_audit": "--- Kiểm tra ánh xạ (cuộn xuống để xem) ---",
         "diag_current_mapping": "Ánh xạ hiện tại",
@@ -232,6 +282,12 @@ class PrepareWorker(QObject):
         br_b: int,
         mode: SampleRateMode,
         work_dir: str,
+        pipeline_stages_a: list[PipelineStageConfig],
+        pipeline_stages_b: list[PipelineStageConfig],
+        bandwidth_limit_a_enabled: bool,
+        bandwidth_limit_a_hz: Optional[int],
+        bandwidth_limit_b_enabled: bool,
+        bandwidth_limit_b_hz: Optional[int],
     ) -> None:
         super().__init__()
         self.pipeline = pipeline
@@ -242,6 +298,12 @@ class PrepareWorker(QObject):
         self.br_b = br_b
         self.mode = mode
         self.work_dir = work_dir
+        self.pipeline_stages_a = list(pipeline_stages_a)
+        self.pipeline_stages_b = list(pipeline_stages_b)
+        self.bandwidth_limit_a_enabled = bandwidth_limit_a_enabled
+        self.bandwidth_limit_a_hz = bandwidth_limit_a_hz
+        self.bandwidth_limit_b_enabled = bandwidth_limit_b_enabled
+        self.bandwidth_limit_b_hz = bandwidth_limit_b_hz
 
     def run(self) -> None:
         try:
@@ -253,6 +315,12 @@ class PrepareWorker(QObject):
                 bitrate_b_kbps=self.br_b,
                 mode=self.mode,
                 work_dir=self.work_dir,
+                pipeline_stages_a=self.pipeline_stages_a,
+                pipeline_stages_b=self.pipeline_stages_b,
+                bandwidth_limit_a_enabled=self.bandwidth_limit_a_enabled,
+                bandwidth_limit_a_hz=self.bandwidth_limit_a_hz,
+                bandwidth_limit_b_enabled=self.bandwidth_limit_b_enabled,
+                bandwidth_limit_b_hz=self.bandwidth_limit_b_hz,
             )
             self.finished.emit(prepared, arr_a, arr_b)
         except PipelineCancelled:
@@ -276,6 +344,13 @@ class MainWindow(QMainWindow):
 
         self.catalog = codec_catalog()
         self.codec_ids = list(self.catalog.keys())
+        self.pipeline_codec_ids = [cid for cid in self.codec_ids if cid != "lossless_unprocessed"]
+
+        self.pipeline_codec_a: list[QComboBox] = []
+        self.pipeline_codec_b: list[QComboBox] = []
+        self.pipeline_br_a: list[QComboBox] = []
+        self.pipeline_br_b: list[QComboBox] = []
+        self.stage_rows: list[tuple[QLabel, QComboBox, QComboBox, QComboBox, QComboBox]] = []
 
         self.prepared_session = None
         self._user_scrubbing = False
@@ -383,9 +458,27 @@ class MainWindow(QMainWindow):
         self.lbl_bitrate_a.setText(self._t("bitrate_a"))
         self.lbl_bitrate_b.setText(self._t("bitrate_b"))
         self.lbl_mapping_mode.setText(self._t("mapping_mode"))
+        self.lbl_stage_count_a.setText(self._t("stage_count_a"))
+        self.lbl_stage_count_b.setText(self._t("stage_count_b"))
+        self.bandwidth_limit_a_enabled.setText(self._t("bandwidth_limit_a"))
+        self.bandwidth_limit_b_enabled.setText(self._t("bandwidth_limit_b"))
+        self.lbl_bandwidth_cutoff_a.setText(self._t("bandwidth_cutoff_a"))
+        self.lbl_bandwidth_cutoff_b.setText(self._t("bandwidth_cutoff_b"))
+        self.lbl_pipeline_stages.setText(self._t("pipeline_stages"))
+        self.lbl_side_a.setText(self._t("side_a"))
+        self.lbl_side_b.setText(self._t("side_b"))
+        self.lbl_stage_codec_a.setText(self._t("stage_codec"))
+        self.lbl_stage_bitrate_a.setText(self._t("stage_bitrate"))
+        self.lbl_stage_codec_b.setText(self._t("stage_codec"))
+        self.lbl_stage_bitrate_b.setText(self._t("stage_bitrate"))
+        for idx, row in enumerate(self.stage_rows):
+            row[0].setText(f"{self._t('stage_label')} {idx + 1}")
+            self._refresh_pipeline_bitrate("A", idx)
+            self._refresh_pipeline_bitrate("B", idx)
         self._populate_mapping_mode_items()
         self._refresh_bitrate_a()
         self._refresh_bitrate_b()
+        self._refresh_pipeline_controls()
 
         self.group_output.setTitle(self._t("group_output"))
         self.lbl_device.setText(self._t("device"))
@@ -490,6 +583,96 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.lbl_mapping_mode, 2, 0)
         layout.addWidget(self.ab_mapping_mode, 2, 1, 1, 3)
+
+        self.lbl_stage_count_a = QLabel(self._t("stage_count_a"))
+        self.stage_count_a = QSpinBox()
+        self.stage_count_a.setRange(1, 4)
+        self.stage_count_a.setValue(1)
+        self.stage_count_a.valueChanged.connect(self._on_stage_count_changed)
+
+        self.lbl_stage_count_b = QLabel(self._t("stage_count_b"))
+        self.stage_count_b = QSpinBox()
+        self.stage_count_b.setRange(1, 4)
+        self.stage_count_b.setValue(1)
+        self.stage_count_b.valueChanged.connect(self._on_stage_count_changed)
+
+        self.bandwidth_limit_a_enabled = QCheckBox(self._t("bandwidth_limit_a"))
+        self.bandwidth_limit_b_enabled = QCheckBox(self._t("bandwidth_limit_b"))
+        self.bandwidth_limit_a_enabled.stateChanged.connect(self._refresh_pipeline_controls)
+        self.bandwidth_limit_b_enabled.stateChanged.connect(self._refresh_pipeline_controls)
+
+        self.lbl_bandwidth_cutoff_a = QLabel(self._t("bandwidth_cutoff_a"))
+        self.bandwidth_cutoff_a = QComboBox()
+        self.bandwidth_cutoff_a.addItem("14 kHz", 14000)
+        self.bandwidth_cutoff_a.addItem("16 kHz", 16000)
+        self.bandwidth_cutoff_a.addItem("18 kHz", 18000)
+
+        self.lbl_bandwidth_cutoff_b = QLabel(self._t("bandwidth_cutoff_b"))
+        self.bandwidth_cutoff_b = QComboBox()
+        self.bandwidth_cutoff_b.addItem("14 kHz", 14000)
+        self.bandwidth_cutoff_b.addItem("16 kHz", 16000)
+        self.bandwidth_cutoff_b.addItem("18 kHz", 18000)
+
+        layout.addWidget(self.lbl_stage_count_a, 3, 0)
+        layout.addWidget(self.stage_count_a, 3, 1)
+        layout.addWidget(self.bandwidth_limit_a_enabled, 3, 2)
+        layout.addWidget(self.lbl_bandwidth_cutoff_a, 3, 3)
+        layout.addWidget(self.bandwidth_cutoff_a, 3, 4)
+
+        layout.addWidget(self.lbl_stage_count_b, 4, 0)
+        layout.addWidget(self.stage_count_b, 4, 1)
+        layout.addWidget(self.bandwidth_limit_b_enabled, 4, 2)
+        layout.addWidget(self.lbl_bandwidth_cutoff_b, 4, 3)
+        layout.addWidget(self.bandwidth_cutoff_b, 4, 4)
+
+        self.lbl_pipeline_stages = QLabel(self._t("pipeline_stages"))
+        self.lbl_side_a = QLabel(self._t("side_a"))
+        self.lbl_side_b = QLabel(self._t("side_b"))
+        self.lbl_stage_codec_a = QLabel(self._t("stage_codec"))
+        self.lbl_stage_bitrate_a = QLabel(self._t("stage_bitrate"))
+        self.lbl_stage_codec_b = QLabel(self._t("stage_codec"))
+        self.lbl_stage_bitrate_b = QLabel(self._t("stage_bitrate"))
+        layout.addWidget(self.lbl_pipeline_stages, 5, 0)
+        layout.addWidget(self.lbl_side_a, 5, 1)
+        layout.addWidget(self.lbl_side_b, 5, 3)
+        layout.addWidget(self.lbl_stage_codec_a, 6, 1)
+        layout.addWidget(self.lbl_stage_bitrate_a, 6, 2)
+        layout.addWidget(self.lbl_stage_codec_b, 6, 3)
+        layout.addWidget(self.lbl_stage_bitrate_b, 6, 4)
+
+        for idx in range(4):
+            stage_label = QLabel(f"{self._t('stage_label')} {idx + 1}")
+
+            codec_a = QComboBox()
+            codec_b = QComboBox()
+            for cid in self.pipeline_codec_ids:
+                profile = self.catalog[cid]
+                codec_a.addItem(profile.ui_name, cid)
+                codec_b.addItem(profile.ui_name, cid)
+
+            br_a = QComboBox()
+            br_b = QComboBox()
+
+            codec_a.currentIndexChanged.connect(lambda _=None, i=idx: self._refresh_pipeline_bitrate("A", i))
+            codec_b.currentIndexChanged.connect(lambda _=None, i=idx: self._refresh_pipeline_bitrate("B", i))
+
+            self.pipeline_codec_a.append(codec_a)
+            self.pipeline_codec_b.append(codec_b)
+            self.pipeline_br_a.append(br_a)
+            self.pipeline_br_b.append(br_b)
+            self.stage_rows.append((stage_label, codec_a, br_a, codec_b, br_b))
+
+            self._refresh_pipeline_bitrate("A", idx)
+            self._refresh_pipeline_bitrate("B", idx)
+
+            row = 7 + idx
+            layout.addWidget(stage_label, row, 0)
+            layout.addWidget(codec_a, row, 1)
+            layout.addWidget(br_a, row, 2)
+            layout.addWidget(codec_b, row, 3)
+            layout.addWidget(br_b, row, 4)
+
+        self._refresh_pipeline_controls()
         return g
 
     def _build_output_group(self) -> QGroupBox:
@@ -633,6 +816,77 @@ class MainWindow(QMainWindow):
             else:
                 self.br_b.addItem(f"{br} kbps", br)
 
+    def _refresh_pipeline_bitrate(self, side: str, stage_index: int) -> None:
+        codec_box = self.pipeline_codec_a[stage_index] if side == "A" else self.pipeline_codec_b[stage_index]
+        bitrate_box = self.pipeline_br_a[stage_index] if side == "A" else self.pipeline_br_b[stage_index]
+        cid = codec_box.currentData()
+        if cid is None:
+            return
+        bitrate_box.clear()
+        for br in self.catalog[cid].bitrate_options_kbps:
+            if br <= 0:
+                bitrate_box.addItem(self._t("na_unprocessed"), br)
+            else:
+                bitrate_box.addItem(f"{br} kbps", br)
+
+    def _on_stage_count_changed(self, *_args) -> None:
+        self._refresh_pipeline_controls()
+
+    def _refresh_pipeline_controls(self, *_args) -> None:
+        # Unified pipeline UI: hide legacy single-stage controls and always show stage controls.
+        self.codec_a.setVisible(False)
+        self.codec_b.setVisible(False)
+        self.br_a.setVisible(False)
+        self.br_b.setVisible(False)
+        self.lbl_codec_a.setVisible(False)
+        self.lbl_codec_b.setVisible(False)
+        self.lbl_bitrate_a.setVisible(False)
+        self.lbl_bitrate_b.setVisible(False)
+
+        self.stage_count_a.setEnabled(True)
+        self.stage_count_b.setEnabled(True)
+        self.bandwidth_limit_a_enabled.setEnabled(True)
+        self.bandwidth_limit_b_enabled.setEnabled(True)
+        self.bandwidth_cutoff_a.setEnabled(self.bandwidth_limit_a_enabled.isChecked())
+        self.bandwidth_cutoff_b.setEnabled(self.bandwidth_limit_b_enabled.isChecked())
+        self.lbl_stage_count_a.setEnabled(True)
+        self.lbl_stage_count_b.setEnabled(True)
+        self.lbl_bandwidth_cutoff_a.setEnabled(self.bandwidth_limit_a_enabled.isChecked())
+        self.lbl_bandwidth_cutoff_b.setEnabled(self.bandwidth_limit_b_enabled.isChecked())
+        self.lbl_pipeline_stages.setEnabled(True)
+        self.lbl_side_a.setVisible(True)
+        self.lbl_side_b.setVisible(True)
+        self.lbl_stage_codec_a.setVisible(True)
+        self.lbl_stage_bitrate_a.setVisible(True)
+        self.lbl_stage_codec_b.setVisible(True)
+        self.lbl_stage_bitrate_b.setVisible(True)
+        self.lbl_pipeline_stages.setVisible(True)
+
+        active_stage_count_a = int(self.stage_count_a.value())
+        active_stage_count_b = int(self.stage_count_b.value())
+        for idx, row in enumerate(self.stage_rows):
+            stage_label, codec_a, br_a, codec_b, br_b = row
+            show_a = idx < active_stage_count_a
+            show_b = idx < active_stage_count_b
+            stage_label.setVisible(show_a or show_b)
+            codec_a.setVisible(show_a)
+            br_a.setVisible(show_a)
+            codec_b.setVisible(show_b)
+            br_b.setVisible(show_b)
+
+    def _collect_pipeline_stages(self, side: str) -> list[PipelineStageConfig]:
+        stage_count = int(self.stage_count_a.value()) if side == "A" else int(self.stage_count_b.value())
+        stages: list[PipelineStageConfig] = []
+        for idx in range(stage_count):
+            if side == "A":
+                cid = str(self.pipeline_codec_a[idx].currentData())
+                br = int(self.pipeline_br_a[idx].currentData())
+            else:
+                cid = str(self.pipeline_codec_b[idx].currentData())
+                br = int(self.pipeline_br_b[idx].currentData())
+            stages.append(PipelineStageConfig(codec_id=cid, bitrate_kbps=br))
+        return stages
+
     def _load_devices(self) -> None:
         self.device_combo.clear()
         for dev in self.player.list_output_devices():
@@ -690,10 +944,16 @@ class MainWindow(QMainWindow):
             return
 
         mode = self.sr_mode.currentData()
-        codec_a = self.codec_a.currentData()
-        codec_b = self.codec_b.currentData()
-        br_a = int(self.br_a.currentData())
-        br_b = int(self.br_b.currentData())
+        pipeline_stages_a = self._collect_pipeline_stages("A")
+        pipeline_stages_b = self._collect_pipeline_stages("B")
+        codec_a = pipeline_stages_a[0].codec_id
+        codec_b = pipeline_stages_b[0].codec_id
+        br_a = int(pipeline_stages_a[0].bitrate_kbps)
+        br_b = int(pipeline_stages_b[0].bitrate_kbps)
+        bandwidth_a_enabled = self.bandwidth_limit_a_enabled.isChecked()
+        bandwidth_b_enabled = self.bandwidth_limit_b_enabled.isChecked()
+        bandwidth_a_hz = int(self.bandwidth_cutoff_a.currentData()) if bandwidth_a_enabled else None
+        bandwidth_b_hz = int(self.bandwidth_cutoff_b.currentData()) if bandwidth_b_enabled else None
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._active_stamp = stamp
@@ -716,6 +976,12 @@ class MainWindow(QMainWindow):
             br_b=br_b,
             mode=mode,
             work_dir=str(work_dir),
+            pipeline_stages_a=pipeline_stages_a,
+            pipeline_stages_b=pipeline_stages_b,
+            bandwidth_limit_a_enabled=bandwidth_a_enabled,
+            bandwidth_limit_a_hz=bandwidth_a_hz,
+            bandwidth_limit_b_enabled=bandwidth_b_enabled,
+            bandwidth_limit_b_hz=bandwidth_b_hz,
         )
         self.prepare_worker.moveToThread(self.prepare_thread)
         self.prepare_thread.started.connect(self.prepare_worker.run)
@@ -755,6 +1021,13 @@ class MainWindow(QMainWindow):
                 "original_sample_rate": prepared.original_sample_rate,
                 "target_sample_rate": prepared.target_sample_rate,
                 "mode": prepared.mode.value,
+                "processing_mode": prepared.processing_mode.value,
+                "pipeline_stage_count_a": prepared.pipeline_stage_count_a,
+                "pipeline_stage_count_b": prepared.pipeline_stage_count_b,
+                "bandwidth_limit_a_enabled": prepared.bandwidth_limit_a_enabled,
+                "bandwidth_limit_a_hz": prepared.bandwidth_limit_a_hz,
+                "bandwidth_limit_b_enabled": prepared.bandwidth_limit_b_enabled,
+                "bandwidth_limit_b_hz": prepared.bandwidth_limit_b_hz,
                 "codec_a": prepared.track_a.codec_name,
                 "codec_b": prepared.track_b.codec_name,
                 "bitrate_a_kbps": prepared.track_a.bitrate_kbps,
@@ -775,6 +1048,11 @@ class MainWindow(QMainWindow):
             f"{self._t('status_ready')} | sr={prepared.target_sample_rate} Hz | duration={prepared.duration_seconds:.2f}s | "
             f"loudness_diff={validation.loudness_diff_db:.3f} dB | lag={validation.alignment_lag_samples} samples"
         )
+        msg += f" | stagesA={prepared.pipeline_stage_count_a} | stagesB={prepared.pipeline_stage_count_b}"
+        if prepared.bandwidth_limit_a_enabled and prepared.bandwidth_limit_a_hz is not None:
+            msg += f" | lowpassA={prepared.bandwidth_limit_a_hz}Hz"
+        if prepared.bandwidth_limit_b_enabled and prepared.bandwidth_limit_b_hz is not None:
+            msg += f" | lowpassB={prepared.bandwidth_limit_b_hz}Hz"
         if mapping_mode == "fixed":
             msg += f" | {self._t('labels_fixed')}"
         else:
@@ -957,6 +1235,13 @@ class MainWindow(QMainWindow):
                     "original_sample_rate": self.prepared_session.original_sample_rate,
                     "target_sample_rate": self.prepared_session.target_sample_rate,
                     "mode": self.prepared_session.mode.value,
+                    "processing_mode": self.prepared_session.processing_mode.value,
+                    "pipeline_stage_count_a": self.prepared_session.pipeline_stage_count_a,
+                    "pipeline_stage_count_b": self.prepared_session.pipeline_stage_count_b,
+                    "bandwidth_limit_a_enabled": self.prepared_session.bandwidth_limit_a_enabled,
+                    "bandwidth_limit_a_hz": self.prepared_session.bandwidth_limit_a_hz,
+                    "bandwidth_limit_b_enabled": self.prepared_session.bandwidth_limit_b_enabled,
+                    "bandwidth_limit_b_hz": self.prepared_session.bandwidth_limit_b_hz,
                     "codec_a": self.prepared_session.track_a.codec_name,
                     "codec_b": self.prepared_session.track_b.codec_name,
                     "bitrate_a_kbps": self.prepared_session.track_a.bitrate_kbps,
@@ -985,16 +1270,41 @@ class MainWindow(QMainWindow):
             self._t("diag_session_summary"),
             f"{self._t('diag_input')}: {self.prepared_session.input_file}",
             f"{self._t('diag_mode')}: {self.prepared_session.mode.value}",
+            f"{self._t('diag_processing_mode')}: {self.prepared_session.processing_mode.value}",
+            f"{self._t('diag_pipeline_stages_a')}: {self.prepared_session.pipeline_stage_count_a}",
+            f"{self._t('diag_pipeline_stages_b')}: {self.prepared_session.pipeline_stage_count_b}",
+            f"{self._t('diag_bandwidth_limit_a')}: {self.prepared_session.bandwidth_limit_a_enabled}",
+            f"{self._t('diag_bandwidth_cutoff_a')}: {self.prepared_session.bandwidth_limit_a_hz}",
+            f"{self._t('diag_bandwidth_limit_b')}: {self.prepared_session.bandwidth_limit_b_enabled}",
+            f"{self._t('diag_bandwidth_cutoff_b')}: {self.prepared_session.bandwidth_limit_b_hz}",
             f"{self._t('diag_target_sr')}: {self.prepared_session.target_sample_rate} Hz",
-            f"Codec A: {self.prepared_session.track_a.codec_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps",
-            f"Codec B: {self.prepared_session.track_b.codec_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps",
-            f"A/B Label Mapping Mode: {mapping_mode}",
+            f"{self._t('codec_a')}: {self.prepared_session.track_a.codec_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps",
+            f"{self._t('codec_b')}: {self.prepared_session.track_b.codec_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps",
+            f"{self._t('mapping_mode')}: {mapping_mode}",
             f"{self._t('diag_trials')}: {stats.total_trials}",
             f"{self._t('diag_correct')}: {stats.correct_trials}",
-            f"p-value (one-tailed): {stats.p_value_one_tailed:.6f}",
+            f"{self._t('pvalue')}: {stats.p_value_one_tailed:.6f}",
+            "",
+            f"{self._t('diag_pipeline_a_stages')}:",
+        ]
+
+        for stage in self.prepared_session.track_a.stages:
+            lines.append(
+                f"A{stage.stage_index}: {stage.codec_name} @ {stage.bitrate_kbps} kbps "
+                f"(sr {stage.sample_rate_in}->{stage.sample_rate_out})"
+            )
+
+        lines.append(f"{self._t('diag_pipeline_b_stages')}:")
+        for stage in self.prepared_session.track_b.stages:
+            lines.append(
+                f"B{stage.stage_index}: {stage.codec_name} @ {stage.bitrate_kbps} kbps "
+                f"(sr {stage.sample_rate_in}->{stage.sample_rate_out})"
+            )
+
+        lines.extend([
             "",
             self._t("diag_trial_details"),
-        ]
+        ])
 
         if not self.logger.trials:
             lines.append(self._t("diag_no_trials"))

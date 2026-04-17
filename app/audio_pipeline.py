@@ -17,8 +17,11 @@ from scipy import signal
 
 from .models import (
     CodecProfile,
+    PipelineStageConfig,
+    PipelineStageResult,
     PreparedSession,
     PreparedTrack,
+    ProcessingMode,
     SampleRateMode,
     SessionValidation,
     codec_catalog,
@@ -106,6 +109,8 @@ class AudioPipeline:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
 
         stdout = ""
@@ -163,7 +168,13 @@ class AudioPipeline:
             "a:0",
             input_path,
         ]
-        proc = subprocess.run(args, capture_output=True, text=True)
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
         if proc.returncode != 0:
             raise PipelineError(proc.stderr or "ffprobe failed")
         try:
@@ -278,6 +289,95 @@ class AudioPipeline:
         self._run(decode_args)
         return str(encoded_path), str(decoded_path)
 
+    def _run_stage(
+        self,
+        wav_in: str,
+        work_dir: Path,
+        stage_cfg: PipelineStageConfig,
+        target_sr: int,
+        side_label: str,
+        stage_index: int,
+    ) -> PipelineStageResult:
+        if stage_cfg.codec_id not in self.catalog:
+            raise PipelineError(f"Unknown codec profile in stage {stage_index}: {stage_cfg.codec_id}")
+
+        profile = self.catalog[stage_cfg.codec_id]
+        if stage_cfg.bitrate_kbps < 0:
+            raise PipelineError(f"Invalid bitrate in stage {stage_index}")
+
+        if profile.pipeline_noop:
+            input_sr = self._probe(wav_in).get("sample_rate", 0)
+            in_sr = int(input_sr or 0)
+            if in_sr <= 0:
+                raise PipelineError(f"Unable to detect sample-rate at stage {stage_index}")
+            return PipelineStageResult(
+                stage_index=stage_index,
+                codec_id=profile.codec_id,
+                codec_name=profile.ui_name,
+                bitrate_kbps=0,
+                sample_rate_in=in_sr,
+                sample_rate_out=in_sr,
+                encoded_path=wav_in,
+                decoded_path=wav_in,
+            )
+
+        encoded_path, decoded_path = self._encode_decode(
+            wav_in=wav_in,
+            work_dir=work_dir,
+            profile=profile,
+            bitrate_kbps=stage_cfg.bitrate_kbps,
+            target_sr=target_sr,
+            label=f"{side_label}_stage{stage_index}",
+        )
+
+        input_sr = self._probe(wav_in).get("sample_rate", 0)
+        output_sr = self._probe(decoded_path).get("sample_rate", 0)
+        in_sr = int(input_sr or 0)
+        out_sr = int(output_sr or 0)
+        if in_sr <= 0 or out_sr <= 0:
+            raise PipelineError(f"Unable to detect sample-rate in stage {stage_index}")
+
+        return PipelineStageResult(
+            stage_index=stage_index,
+            codec_id=profile.codec_id,
+            codec_name=profile.ui_name,
+            bitrate_kbps=stage_cfg.bitrate_kbps,
+            sample_rate_in=in_sr,
+            sample_rate_out=out_sr,
+            encoded_path=encoded_path,
+            decoded_path=decoded_path,
+        )
+
+    def _run_pipeline_for_side(
+        self,
+        wav_in: str,
+        work_dir: Path,
+        stages: List[PipelineStageConfig],
+        target_sr: int,
+        side_label: str,
+    ) -> Tuple[str, List[PipelineStageResult]]:
+        current = wav_in
+        stage_results: List[PipelineStageResult] = []
+        for idx, stage_cfg in enumerate(stages, start=1):
+            stage_result = self._run_stage(
+                wav_in=current,
+                work_dir=work_dir,
+                stage_cfg=stage_cfg,
+                target_sr=target_sr,
+                side_label=side_label,
+                stage_index=idx,
+            )
+            stage_results.append(stage_result)
+            current = stage_result.decoded_path
+
+            if stage_result.sample_rate_out != target_sr:
+                raise PipelineError(
+                    f"Stage {idx} on side {side_label} changed sample-rate unexpectedly "
+                    f"({stage_result.sample_rate_out} vs target {target_sr})"
+                )
+
+        return current, stage_results
+
     @staticmethod
     def _load_audio(path: str) -> Tuple[np.ndarray, int]:
         data, sr = sf.read(path, always_2d=True, dtype="float32")
@@ -347,6 +447,16 @@ class AudioPipeline:
         return a2, b2, float(final_lufs_a), float(final_lufs_b), peak_a_dbfs, peak_b_dbfs
 
     @staticmethod
+    def _apply_lowpass(data: np.ndarray, sample_rate: int, cutoff_hz: int) -> np.ndarray:
+        nyquist = 0.5 * float(sample_rate)
+        if cutoff_hz <= 0 or cutoff_hz >= nyquist:
+            return data
+
+        normalized_cutoff = float(cutoff_hz) / nyquist
+        sos = signal.butter(N=8, Wn=normalized_cutoff, btype="lowpass", output="sos")
+        return signal.sosfiltfilt(sos, data, axis=0).astype(np.float32, copy=False)
+
+    @staticmethod
     def _write_float_wav(path: str, data: np.ndarray, sample_rate: int) -> None:
         sf.write(path, data, samplerate=sample_rate, subtype="PCM_16")
 
@@ -359,6 +469,13 @@ class AudioPipeline:
         bitrate_b_kbps: int,
         mode: SampleRateMode,
         work_dir: str,
+        processing_mode: ProcessingMode = ProcessingMode.SINGLE_STAGE,
+        pipeline_stages_a: Optional[List[PipelineStageConfig]] = None,
+        pipeline_stages_b: Optional[List[PipelineStageConfig]] = None,
+        bandwidth_limit_a_enabled: bool = False,
+        bandwidth_limit_a_hz: Optional[int] = None,
+        bandwidth_limit_b_enabled: bool = False,
+        bandwidth_limit_b_hz: Optional[int] = None,
     ) -> Tuple[PreparedSession, np.ndarray, np.ndarray]:
         self._reset_cancel()
         self.check_binaries()
@@ -381,15 +498,81 @@ class AudioPipeline:
         working_wav = wd / "working_input.wav"
         self._to_working_wav(str(p_in), str(working_wav), target_sr)
 
-        profile_a = self.catalog[codec_a_id]
-        profile_b = self.catalog[codec_b_id]
+        use_pipeline_stages = bool(pipeline_stages_a) and bool(pipeline_stages_b)
 
-        enc_a, dec_a = self._encode_decode(
-            str(working_wav), wd, profile_a, bitrate_a_kbps, target_sr, "track_a"
-        )
-        enc_b, dec_b = self._encode_decode(
-            str(working_wav), wd, profile_b, bitrate_b_kbps, target_sr, "track_b"
-        )
+        if use_pipeline_stages:
+            if len(pipeline_stages_a) < 1 or len(pipeline_stages_a) > 4:
+                raise PipelineError("Pipeline A supports 1 to 4 stages")
+            if len(pipeline_stages_b) < 1 or len(pipeline_stages_b) > 4:
+                raise PipelineError("Pipeline B supports 1 to 4 stages")
+
+            dec_a, stage_results_a = self._run_pipeline_for_side(
+                wav_in=str(working_wav),
+                work_dir=wd,
+                stages=pipeline_stages_a,
+                target_sr=target_sr,
+                side_label="track_a",
+            )
+            dec_b, stage_results_b = self._run_pipeline_for_side(
+                wav_in=str(working_wav),
+                work_dir=wd,
+                stages=pipeline_stages_b,
+                target_sr=target_sr,
+                side_label="track_b",
+            )
+
+            enc_a = stage_results_a[-1].encoded_path
+            enc_b = stage_results_b[-1].encoded_path
+            profile_a = self.catalog[pipeline_stages_a[-1].codec_id]
+            profile_b = self.catalog[pipeline_stages_b[-1].codec_id]
+            effective_bitrate_a = int(pipeline_stages_a[-1].bitrate_kbps)
+            effective_bitrate_b = int(pipeline_stages_b[-1].bitrate_kbps)
+            stage_count_a = len(stage_results_a)
+            stage_count_b = len(stage_results_b)
+            processing_mode_effective = (
+                ProcessingMode.SINGLE_STAGE
+                if stage_count_a == 1 and stage_count_b == 1
+                else ProcessingMode.CASCADED_PIPELINE
+            )
+        else:
+            profile_a = self.catalog[codec_a_id]
+            profile_b = self.catalog[codec_b_id]
+
+            enc_a, dec_a = self._encode_decode(
+                str(working_wav), wd, profile_a, bitrate_a_kbps, target_sr, "track_a"
+            )
+            enc_b, dec_b = self._encode_decode(
+                str(working_wav), wd, profile_b, bitrate_b_kbps, target_sr, "track_b"
+            )
+            stage_results_a = [
+                PipelineStageResult(
+                    stage_index=1,
+                    codec_id=profile_a.codec_id,
+                    codec_name=profile_a.ui_name,
+                    bitrate_kbps=bitrate_a_kbps,
+                    sample_rate_in=target_sr,
+                    sample_rate_out=target_sr,
+                    encoded_path=enc_a,
+                    decoded_path=dec_a,
+                )
+            ]
+            stage_results_b = [
+                PipelineStageResult(
+                    stage_index=1,
+                    codec_id=profile_b.codec_id,
+                    codec_name=profile_b.ui_name,
+                    bitrate_kbps=bitrate_b_kbps,
+                    sample_rate_in=target_sr,
+                    sample_rate_out=target_sr,
+                    encoded_path=enc_b,
+                    decoded_path=dec_b,
+                )
+            ]
+            effective_bitrate_a = bitrate_a_kbps
+            effective_bitrate_b = bitrate_b_kbps
+            stage_count_a = 1
+            stage_count_b = 1
+            processing_mode_effective = ProcessingMode.SINGLE_STAGE
 
         arr_a, sr_a = self._load_audio(dec_a)
         arr_b, sr_b = self._load_audio(dec_b)
@@ -400,6 +583,16 @@ class AudioPipeline:
         max_lag = int(0.100 * target_sr)
         lag = self._estimate_lag_samples(arr_a, arr_b, max_lag=max_lag)
         arr_a, arr_b = self._apply_alignment(arr_a, arr_b, lag)
+
+        if bandwidth_limit_a_enabled:
+            if bandwidth_limit_a_hz not in (14000, 16000, 18000):
+                raise PipelineError("Bandwidth limit cutoff A must be 14 kHz, 16 kHz, or 18 kHz")
+            arr_a = self._apply_lowpass(arr_a, target_sr, int(bandwidth_limit_a_hz))
+
+        if bandwidth_limit_b_enabled:
+            if bandwidth_limit_b_hz not in (14000, 16000, 18000):
+                raise PipelineError("Bandwidth limit cutoff B must be 14 kHz, 16 kHz, or 18 kHz")
+            arr_b = self._apply_lowpass(arr_b, target_sr, int(bandwidth_limit_b_hz))
 
         arr_a, arr_b, lufs_a, lufs_b, peak_a_dbfs, peak_b_dbfs = self._normalize_pair_to_target(
             arr_a,
@@ -437,23 +630,25 @@ class AudioPipeline:
             label="A",
             codec_id=profile_a.codec_id,
             codec_name=profile_a.ui_name,
-            bitrate_kbps=bitrate_a_kbps,
+            bitrate_kbps=effective_bitrate_a,
             sample_rate=target_sr,
             pcm_path=str(norm_a_path),
             encoded_path=enc_a,
             loudness_lufs=float(lufs_a),
             true_peak_dbfs=float(peak_a_dbfs),
+            stages=stage_results_a,
         )
         track_b = PreparedTrack(
             label="B",
             codec_id=profile_b.codec_id,
             codec_name=profile_b.ui_name,
-            bitrate_kbps=bitrate_b_kbps,
+            bitrate_kbps=effective_bitrate_b,
             sample_rate=target_sr,
             pcm_path=str(norm_b_path),
             encoded_path=enc_b,
             loudness_lufs=float(lufs_b),
             true_peak_dbfs=float(peak_b_dbfs),
+            stages=stage_results_b,
         )
 
         session = PreparedSession(
@@ -462,8 +657,15 @@ class AudioPipeline:
             original_sample_rate=original_sr,
             target_sample_rate=target_sr,
             mode=mode,
+            processing_mode=processing_mode_effective,
             duration_seconds=duration_seconds,
             channels=int(arr_a.shape[1]),
+            pipeline_stage_count_a=stage_count_a,
+            pipeline_stage_count_b=stage_count_b,
+            bandwidth_limit_a_enabled=bandwidth_limit_a_enabled,
+            bandwidth_limit_a_hz=bandwidth_limit_a_hz,
+            bandwidth_limit_b_enabled=bandwidth_limit_b_enabled,
+            bandwidth_limit_b_hz=bandwidth_limit_b_hz,
             track_a=track_a,
             track_b=track_b,
             validation=validation,

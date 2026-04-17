@@ -128,9 +128,10 @@ This creates:
 6. Perform ABX trials with Play A/B/X and answer X=A or X=B.
   - Use **Cancel ABX Session** to reset trial state and score.
 7. Use **Show/Refresh Diagnostics** to review in-app post-session details:
-  - A/B label mapping mode and actual session mapping
+  - A/B label mapping mode (non-revealing in top summary)
   - Trial-by-trial X label/source, answer label/source, and correctness
   - Whether mapping changed for the next trial
+  - Full mapping audit is placed in a lower section so it is not immediately visible
 8. Export results as JSON/CSV.
 
 ## Notes On Experimental Validity

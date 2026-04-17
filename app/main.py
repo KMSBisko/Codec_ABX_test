@@ -656,7 +656,6 @@ class MainWindow(QMainWindow):
 
         stats = self.engine.stats()
         mapping_mode = "fixed" if self._mapping_mode_pending == "fixed" else "blind_random"
-        mapping_desc = f"A->{self._display_to_source['A']} | B->{self._display_to_source['B']}"
 
         lines = [
             "Session Summary",
@@ -666,7 +665,6 @@ class MainWindow(QMainWindow):
             f"Codec A: {self.prepared_session.track_a.codec_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps",
             f"Codec B: {self.prepared_session.track_b.codec_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps",
             f"A/B Label Mapping Mode: {mapping_mode}",
-            f"A/B Label Mapping: {mapping_desc}",
             f"Trials: {stats.total_trials}",
             f"Correct: {stats.correct_trials}",
             f"p-value (one-tailed): {stats.p_value_one_tailed:.6f}",
@@ -678,35 +676,41 @@ class MainWindow(QMainWindow):
             lines.append("(no trial answers submitted yet)")
         else:
             for trial in self.logger.trials:
-                if trial.x_source is not None:
-                    x_source = trial.x_source
-                else:
-                    x_source = self._resolve_display_source(trial.x_is)
+                lines.append(
+                    "#"
+                    + str(trial.trial_index)
+                    + f" | X label={trial.x_is}"
+                    + f" | Answer={trial.answer}"
+                    + f" | Correct={trial.correct}"
+                )
 
-                if trial.answer_source is not None:
-                    answer_source = trial.answer_source
-                else:
-                    answer_source = self._resolve_display_source(trial.answer)
-
-                trial_mapping = ""
-                if trial.mapping_a_to and trial.mapping_b_to:
-                    trial_mapping = f" | Mapping(A->{trial.mapping_a_to}, B->{trial.mapping_b_to})"
-
-                next_trial_note = ""
+        # Keep mapping-revealing details far below so users do not see them accidentally.
+        lines.extend([""] * 28)
+        lines.append("--- Mapping Audit (Scroll Down To Reveal) ---")
+        lines.append(f"Current Mapping: A->{self._display_to_source['A']} | B->{self._display_to_source['B']}")
+        if not self.logger.trials:
+            lines.append("(no mapping audit entries yet)")
+        else:
+            for trial in self.logger.trials:
+                x_source = trial.x_source if trial.x_source is not None else self._resolve_display_source(trial.x_is)
+                answer_source = (
+                    trial.answer_source
+                    if trial.answer_source is not None
+                    else self._resolve_display_source(trial.answer)
+                )
+                mapping_a_to = trial.mapping_a_to if trial.mapping_a_to is not None else "?"
+                mapping_b_to = trial.mapping_b_to if trial.mapping_b_to is not None else "?"
+                next_trial_changed = "?"
                 if trial.mapping_changed_for_next_trial is not None:
-                    next_trial_note = (
-                        " | NextTrialMappingChanged="
-                        + ("Yes" if trial.mapping_changed_for_next_trial else "No")
-                    )
+                    next_trial_changed = "Yes" if trial.mapping_changed_for_next_trial else "No"
 
                 lines.append(
                     "#"
                     + str(trial.trial_index)
                     + f" | X label={trial.x_is} (source={x_source})"
                     + f" | Answer={trial.answer} (source={answer_source})"
-                    + f" | Correct={trial.correct}"
-                    + trial_mapping
-                    + next_trial_note
+                    + f" | Mapping(A->{mapping_a_to}, B->{mapping_b_to})"
+                    + f" | NextTrialMappingChanged={next_trial_changed}"
                 )
 
         self.diagnostics_view.setPlainText("\n".join(lines))

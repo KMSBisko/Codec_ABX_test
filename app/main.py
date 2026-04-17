@@ -43,6 +43,179 @@ SESSION_ROOT = Path("sessions")
 SESSION_MAX_KEEP = 8
 SESSION_MAX_AGE = timedelta(days=1)
 
+TRANSLATIONS = {
+    "en": {
+        "window_title": "Codec ABX Tester",
+        "lang_english": "English",
+        "lang_vietnamese": "Tiếng Việt",
+        "status_idle": "Status: idle",
+        "status_prefix": "Status: ",
+        "group_input": "1) Input",
+        "input_placeholder": "Select WAV or FLAC",
+        "browse": "Browse",
+        "audio_file": "Audio file",
+        "sample_rate_mode": "Sample-rate mode",
+        "sr_native": "Native sample rate (default)",
+        "sr_force_48k": "Force 48 kHz (Bluetooth simulation)",
+        "prepare": "Preprocess A/B",
+        "cancel_prepare": "Cancel Preprocess",
+        "group_codec": "2) Codec Profiles",
+        "codec_a": "Codec A",
+        "codec_b": "Codec B",
+        "bitrate_a": "Bitrate A",
+        "bitrate_b": "Bitrate B",
+        "mapping_mode": "A/B label mapping",
+        "map_fixed": "Fixed labels (Play A=Codec A, Play B=Codec B)",
+        "map_blind": "Blinded labels (Play A/B randomized per session)",
+        "group_output": "3) Output Device",
+        "device": "Device",
+        "refresh_devices": "Refresh devices",
+        "exclusive": "Request exclusive mode when available",
+        "group_playback": "4) Playback + Shared Timeline",
+        "play_a": "Play A",
+        "play_b": "Play B",
+        "play_x": "Play X",
+        "pause": "Pause",
+        "stop": "Stop",
+        "loop": "Loop",
+        "start_sec": "Start (s)",
+        "end_sec": "End (s)",
+        "group_abx": "5) ABX Trials",
+        "trial": "Trial",
+        "score": "Score",
+        "pvalue": "p-value (one-tailed)",
+        "x_eq_a": "X = A",
+        "x_eq_b": "X = B",
+        "export_json": "Export JSON",
+        "export_csv": "Export CSV",
+        "cancel_abx": "Cancel ABX Session",
+        "group_diag": "6) Post-Session Diagnostics",
+        "refresh_diag": "Show/Refresh Diagnostics",
+        "diag_placeholder": "Diagnostics will appear here after preprocessing/trials.",
+        "na_unprocessed": "N/A (unprocessed)",
+        "already_running_title": "Already running",
+        "already_running_text": "Preprocessing is already running.",
+        "input_required_title": "Input required",
+        "input_required_text": "Please select a WAV or FLAC file.",
+        "status_preparing": "preprocessing and validating A/B...",
+        "status_cancelling_prepare": "cancelling preprocessing...",
+        "status_prepare_failed": "preprocessing failed",
+        "status_prepare_cancelled": "preprocessing cancelled",
+        "prepare_failed_title": "Preparation failed",
+        "prepare_first_title": "Prepare first",
+        "prepare_first_text": "Please preprocess A/B first.",
+        "playback_error_title": "Playback error",
+        "status_session_cancelled": "ABX session cancelled and reset",
+        "diag_none": "No prepared session yet.",
+        "nothing_export_title": "Nothing to export",
+        "nothing_export_text": "No trial results yet.",
+        "export_failed_title": "Export failed",
+        "json_filter": "JSON (*.json)",
+        "csv_filter": "CSV (*.csv)",
+        "save_json": "Export JSON",
+        "save_csv": "Export CSV",
+        "status_ready": "ready",
+        "labels_fixed": "labels=fixed",
+        "labels_blinded": "labels=blinded",
+        "diag_session_summary": "Session Summary",
+        "diag_input": "Input",
+        "diag_mode": "Mode",
+        "diag_target_sr": "Target SR",
+        "diag_trials": "Trials",
+        "diag_correct": "Correct",
+        "diag_trial_details": "Trial Details",
+        "diag_no_trials": "(no trial answers submitted yet)",
+        "diag_mapping_audit": "--- Mapping Audit (Scroll Down To Reveal) ---",
+        "diag_current_mapping": "Current Mapping",
+        "diag_no_mapping_entries": "(no mapping audit entries yet)",
+    },
+    "vi": {
+        "window_title": "Trình kiểm tra ABX Codec",
+        "lang_english": "English",
+        "lang_vietnamese": "Tiếng Việt",
+        "status_idle": "Trạng thái: chờ",
+        "status_prefix": "Trạng thái: ",
+        "group_input": "1) Đầu vào",
+        "input_placeholder": "Chọn WAV hoặc FLAC",
+        "browse": "Chọn file",
+        "audio_file": "Tệp âm thanh",
+        "sample_rate_mode": "Chế độ tần số lấy mẫu",
+        "sr_native": "Giữ tần số gốc (mặc định)",
+        "sr_force_48k": "Ép 48 kHz (mô phỏng Bluetooth)",
+        "prepare": "Tiền xử lý A/B",
+        "cancel_prepare": "Hủy tiền xử lý",
+        "group_codec": "2) Cấu hình Codec",
+        "codec_a": "Codec A",
+        "codec_b": "Codec B",
+        "bitrate_a": "Bitrate A",
+        "bitrate_b": "Bitrate B",
+        "mapping_mode": "Ánh xạ nhãn A/B",
+        "map_fixed": "Nhãn cố định (Play A=Codec A, Play B=Codec B)",
+        "map_blind": "Nhãn ẩn (Play A/B được xáo trộn theo phiên)",
+        "group_output": "3) Thiết bị phát",
+        "device": "Thiết bị",
+        "refresh_devices": "Làm mới thiết bị",
+        "exclusive": "Yêu cầu chế độ độc quyền nếu hỗ trợ",
+        "group_playback": "4) Phát + Timeline chung",
+        "play_a": "Phát A",
+        "play_b": "Phát B",
+        "play_x": "Phát X",
+        "pause": "Tạm dừng",
+        "stop": "Dừng",
+        "loop": "Lặp",
+        "start_sec": "Bắt đầu (s)",
+        "end_sec": "Kết thúc (s)",
+        "group_abx": "5) Lượt ABX",
+        "trial": "Lượt",
+        "score": "Điểm",
+        "pvalue": "p-value (một phía)",
+        "x_eq_a": "X = A",
+        "x_eq_b": "X = B",
+        "export_json": "Xuất JSON",
+        "export_csv": "Xuất CSV",
+        "cancel_abx": "Hủy phiên ABX",
+        "group_diag": "6) Chẩn đoán sau phiên",
+        "refresh_diag": "Hiện/Làm mới chẩn đoán",
+        "diag_placeholder": "Thông tin chẩn đoán sẽ hiển thị ở đây sau khi tiền xử lý/làm bài.",
+        "na_unprocessed": "Không áp dụng (gốc)",
+        "already_running_title": "Đang chạy",
+        "already_running_text": "Tiền xử lý đang chạy.",
+        "input_required_title": "Thiếu đầu vào",
+        "input_required_text": "Vui lòng chọn tệp WAV hoặc FLAC.",
+        "status_preparing": "đang tiền xử lý và kiểm tra A/B...",
+        "status_cancelling_prepare": "đang hủy tiền xử lý...",
+        "status_prepare_failed": "tiền xử lý thất bại",
+        "status_prepare_cancelled": "đã hủy tiền xử lý",
+        "prepare_failed_title": "Tiền xử lý thất bại",
+        "prepare_first_title": "Hãy tiền xử lý trước",
+        "prepare_first_text": "Vui lòng tiền xử lý A/B trước.",
+        "playback_error_title": "Lỗi phát",
+        "status_session_cancelled": "Đã hủy và đặt lại phiên ABX",
+        "diag_none": "Chưa có phiên nào được tiền xử lý.",
+        "nothing_export_title": "Không có dữ liệu để xuất",
+        "nothing_export_text": "Chưa có kết quả lượt nào.",
+        "export_failed_title": "Xuất thất bại",
+        "json_filter": "JSON (*.json)",
+        "csv_filter": "CSV (*.csv)",
+        "save_json": "Xuất JSON",
+        "save_csv": "Xuất CSV",
+        "status_ready": "sẵn sàng",
+        "labels_fixed": "nhãn=cố định",
+        "labels_blinded": "nhãn=ẩn",
+        "diag_session_summary": "Tóm tắt phiên",
+        "diag_input": "Đầu vào",
+        "diag_mode": "Chế độ",
+        "diag_target_sr": "Tần số mục tiêu",
+        "diag_trials": "Số lượt",
+        "diag_correct": "Đúng",
+        "diag_trial_details": "Chi tiết lượt",
+        "diag_no_trials": "(chưa có lượt trả lời nào)",
+        "diag_mapping_audit": "--- Kiểm tra ánh xạ (cuộn xuống để xem) ---",
+        "diag_current_mapping": "Ánh xạ hiện tại",
+        "diag_no_mapping_entries": "(chưa có dữ liệu ánh xạ)",
+    },
+}
+
 
 class PrepareWorker(QObject):
     finished = pyqtSignal(object, object, object)
@@ -91,7 +264,9 @@ class PrepareWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Codec ABX Tester")
+        self.current_language = "en"
+        self._last_status_raw = "idle"
+        self.setWindowTitle(self._t("window_title"))
         self.resize(1050, 700)
 
         self.pipeline = AudioPipeline()
@@ -129,6 +304,16 @@ class MainWindow(QMainWindow):
         root = QWidget(self)
         main_layout = QVBoxLayout(root)
 
+        lang_row = QHBoxLayout()
+        self.btn_lang_en = QPushButton(self._t("lang_english"))
+        self.btn_lang_vi = QPushButton(self._t("lang_vietnamese"))
+        self.btn_lang_en.clicked.connect(lambda: self._set_language("en"))
+        self.btn_lang_vi.clicked.connect(lambda: self._set_language("vi"))
+        lang_row.addWidget(self.btn_lang_en)
+        lang_row.addWidget(self.btn_lang_vi)
+        lang_row.addStretch(1)
+        main_layout.addLayout(lang_row)
+
         main_layout.addWidget(self._build_input_group())
         main_layout.addWidget(self._build_codec_group())
         main_layout.addWidget(self._build_output_group())
@@ -136,42 +321,136 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self._build_abx_group())
         main_layout.addWidget(self._build_diagnostics_group())
 
-        self.status_label = QLabel("Status: idle")
+        self.status_label = QLabel(self._t("status_idle"))
         self.status_label.setWordWrap(True)
         main_layout.addWidget(self.status_label)
 
         self.setCentralWidget(root)
 
+    def _t(self, key: str) -> str:
+        return TRANSLATIONS.get(self.current_language, TRANSLATIONS["en"]).get(
+            key,
+            TRANSLATIONS["en"].get(key, key),
+        )
+
+    def _set_language(self, lang: str) -> None:
+        if lang not in TRANSLATIONS:
+            return
+        self.current_language = lang
+        self._apply_language()
+
+    def _populate_sr_mode_items(self) -> None:
+        current_mode = self.sr_mode.currentData()
+        self.sr_mode.blockSignals(True)
+        self.sr_mode.clear()
+        self.sr_mode.addItem(self._t("sr_native"), SampleRateMode.NATIVE)
+        self.sr_mode.addItem(self._t("sr_force_48k"), SampleRateMode.FORCE_48K)
+        if current_mode is not None:
+            idx = self.sr_mode.findData(current_mode)
+            if idx >= 0:
+                self.sr_mode.setCurrentIndex(idx)
+        self.sr_mode.blockSignals(False)
+
+    def _populate_mapping_mode_items(self) -> None:
+        current_mode = self.ab_mapping_mode.currentData()
+        self.ab_mapping_mode.blockSignals(True)
+        self.ab_mapping_mode.clear()
+        self.ab_mapping_mode.addItem(self._t("map_fixed"), "fixed")
+        self.ab_mapping_mode.addItem(self._t("map_blind"), "blind_random")
+        if current_mode is not None:
+            idx = self.ab_mapping_mode.findData(current_mode)
+            if idx >= 0:
+                self.ab_mapping_mode.setCurrentIndex(idx)
+        self.ab_mapping_mode.blockSignals(False)
+
+    def _apply_language(self) -> None:
+        self.setWindowTitle(self._t("window_title"))
+        self.btn_lang_en.setText(self._t("lang_english"))
+        self.btn_lang_vi.setText(self._t("lang_vietnamese"))
+
+        self.group_input.setTitle(self._t("group_input"))
+        self.input_path.setPlaceholderText(self._t("input_placeholder"))
+        self.btn_browse.setText(self._t("browse"))
+        self.lbl_audio_file.setText(self._t("audio_file"))
+        self.lbl_sample_rate_mode.setText(self._t("sample_rate_mode"))
+        self.prepare_btn.setText(self._t("prepare"))
+        self.cancel_prepare_btn.setText(self._t("cancel_prepare"))
+        self._populate_sr_mode_items()
+
+        self.group_codec.setTitle(self._t("group_codec"))
+        self.lbl_codec_a.setText(self._t("codec_a"))
+        self.lbl_codec_b.setText(self._t("codec_b"))
+        self.lbl_bitrate_a.setText(self._t("bitrate_a"))
+        self.lbl_bitrate_b.setText(self._t("bitrate_b"))
+        self.lbl_mapping_mode.setText(self._t("mapping_mode"))
+        self._populate_mapping_mode_items()
+        self._refresh_bitrate_a()
+        self._refresh_bitrate_b()
+
+        self.group_output.setTitle(self._t("group_output"))
+        self.lbl_device.setText(self._t("device"))
+        self.btn_refresh_devices.setText(self._t("refresh_devices"))
+        self.exclusive_mode.setText(self._t("exclusive"))
+
+        self.group_playback.setTitle(self._t("group_playback"))
+        self.btn_play_a.setText(self._t("play_a"))
+        self.btn_play_b.setText(self._t("play_b"))
+        self.btn_play_x.setText(self._t("play_x"))
+        self.btn_pause.setText(self._t("pause"))
+        self.btn_stop.setText(self._t("stop"))
+        self.loop_enabled.setText(self._t("loop"))
+        self.lbl_loop_start.setText(self._t("start_sec"))
+        self.lbl_loop_end.setText(self._t("end_sec"))
+
+        self.group_abx.setTitle(self._t("group_abx"))
+        self.answer_a.setText(self._t("x_eq_a"))
+        self.answer_b.setText(self._t("x_eq_b"))
+        self.export_json_btn.setText(self._t("export_json"))
+        self.export_csv_btn.setText(self._t("export_csv"))
+        self.cancel_session_btn.setText(self._t("cancel_abx"))
+        self._update_score_ui()
+
+        self.group_diag.setTitle(self._t("group_diag"))
+        self.refresh_diag_btn.setText(self._t("refresh_diag"))
+        self.diagnostics_view.setPlaceholderText(self._t("diag_placeholder"))
+
+        self._set_status(self._last_status_raw)
+        self._refresh_diagnostics_panel()
+
     def _build_input_group(self) -> QGroupBox:
-        g = QGroupBox("1) Input")
+        g = QGroupBox(self._t("group_input"))
+        self.group_input = g
         layout = QGridLayout(g)
 
         self.input_path = QLineEdit()
-        self.input_path.setPlaceholderText("Select WAV or FLAC")
-        browse_btn = QPushButton("Browse")
-        browse_btn.clicked.connect(self.on_browse)
+        self.input_path.setPlaceholderText(self._t("input_placeholder"))
+        self.btn_browse = QPushButton(self._t("browse"))
+        self.btn_browse.clicked.connect(self.on_browse)
 
         self.sr_mode = QComboBox()
-        self.sr_mode.addItem("Native sample rate (default)", SampleRateMode.NATIVE)
-        self.sr_mode.addItem("Force 48 kHz (Bluetooth simulation)", SampleRateMode.FORCE_48K)
+        self._populate_sr_mode_items()
 
-        self.prepare_btn = QPushButton("Preprocess A/B")
+        self.prepare_btn = QPushButton(self._t("prepare"))
         self.prepare_btn.clicked.connect(self.on_prepare)
-        self.cancel_prepare_btn = QPushButton("Cancel Preprocess")
+        self.cancel_prepare_btn = QPushButton(self._t("cancel_prepare"))
         self.cancel_prepare_btn.setEnabled(False)
         self.cancel_prepare_btn.clicked.connect(self.on_cancel_prepare)
 
-        layout.addWidget(QLabel("Audio file"), 0, 0)
+        self.lbl_audio_file = QLabel(self._t("audio_file"))
+        self.lbl_sample_rate_mode = QLabel(self._t("sample_rate_mode"))
+
+        layout.addWidget(self.lbl_audio_file, 0, 0)
         layout.addWidget(self.input_path, 0, 1)
-        layout.addWidget(browse_btn, 0, 2)
-        layout.addWidget(QLabel("Sample-rate mode"), 1, 0)
+        layout.addWidget(self.btn_browse, 0, 2)
+        layout.addWidget(self.lbl_sample_rate_mode, 1, 0)
         layout.addWidget(self.sr_mode, 1, 1, 1, 2)
         layout.addWidget(self.prepare_btn, 2, 0, 1, 3)
         layout.addWidget(self.cancel_prepare_btn, 3, 0, 1, 3)
         return g
 
     def _build_codec_group(self) -> QGroupBox:
-        g = QGroupBox("2) Codec Profiles")
+        g = QGroupBox(self._t("group_codec"))
+        self.group_codec = g
         layout = QGridLayout(g)
 
         self.codec_a = QComboBox()
@@ -190,50 +469,58 @@ class MainWindow(QMainWindow):
         self._refresh_bitrate_a()
         self._refresh_bitrate_b()
 
-        layout.addWidget(QLabel("Codec A"), 0, 0)
+        self.lbl_codec_a = QLabel(self._t("codec_a"))
+        self.lbl_codec_b = QLabel(self._t("codec_b"))
+        self.lbl_bitrate_a = QLabel(self._t("bitrate_a"))
+        self.lbl_bitrate_b = QLabel(self._t("bitrate_b"))
+        self.lbl_mapping_mode = QLabel(self._t("mapping_mode"))
+
+        layout.addWidget(self.lbl_codec_a, 0, 0)
         layout.addWidget(self.codec_a, 0, 1)
-        layout.addWidget(QLabel("Bitrate A"), 0, 2)
+        layout.addWidget(self.lbl_bitrate_a, 0, 2)
         layout.addWidget(self.br_a, 0, 3)
 
-        layout.addWidget(QLabel("Codec B"), 1, 0)
+        layout.addWidget(self.lbl_codec_b, 1, 0)
         layout.addWidget(self.codec_b, 1, 1)
-        layout.addWidget(QLabel("Bitrate B"), 1, 2)
+        layout.addWidget(self.lbl_bitrate_b, 1, 2)
         layout.addWidget(self.br_b, 1, 3)
 
         self.ab_mapping_mode = QComboBox()
-        self.ab_mapping_mode.addItem("Fixed labels (Play A=Codec A, Play B=Codec B)", "fixed")
-        self.ab_mapping_mode.addItem("Blinded labels (Play A/B randomized per session)", "blind_random")
+        self._populate_mapping_mode_items()
 
-        layout.addWidget(QLabel("A/B label mapping"), 2, 0)
+        layout.addWidget(self.lbl_mapping_mode, 2, 0)
         layout.addWidget(self.ab_mapping_mode, 2, 1, 1, 3)
         return g
 
     def _build_output_group(self) -> QGroupBox:
-        g = QGroupBox("3) Output Device")
+        g = QGroupBox(self._t("group_output"))
+        self.group_output = g
         layout = QGridLayout(g)
 
         self.device_combo = QComboBox()
-        refresh_btn = QPushButton("Refresh devices")
-        refresh_btn.clicked.connect(self._load_devices)
+        self.btn_refresh_devices = QPushButton(self._t("refresh_devices"))
+        self.btn_refresh_devices.clicked.connect(self._load_devices)
 
-        self.exclusive_mode = QCheckBox("Request exclusive mode when available")
+        self.exclusive_mode = QCheckBox(self._t("exclusive"))
+        self.lbl_device = QLabel(self._t("device"))
 
-        layout.addWidget(QLabel("Device"), 0, 0)
+        layout.addWidget(self.lbl_device, 0, 0)
         layout.addWidget(self.device_combo, 0, 1)
-        layout.addWidget(refresh_btn, 0, 2)
+        layout.addWidget(self.btn_refresh_devices, 0, 2)
         layout.addWidget(self.exclusive_mode, 1, 0, 1, 3)
         return g
 
     def _build_playback_group(self) -> QGroupBox:
-        g = QGroupBox("4) Playback + Shared Timeline")
+        g = QGroupBox(self._t("group_playback"))
+        self.group_playback = g
         layout = QVBoxLayout(g)
 
         row1 = QHBoxLayout()
-        self.btn_play_a = QPushButton("Play A")
-        self.btn_play_b = QPushButton("Play B")
-        self.btn_play_x = QPushButton("Play X")
-        self.btn_pause = QPushButton("Pause")
-        self.btn_stop = QPushButton("Stop")
+        self.btn_play_a = QPushButton(self._t("play_a"))
+        self.btn_play_b = QPushButton(self._t("play_b"))
+        self.btn_play_x = QPushButton(self._t("play_x"))
+        self.btn_pause = QPushButton(self._t("pause"))
+        self.btn_stop = QPushButton(self._t("stop"))
 
         self.btn_play_a.clicked.connect(lambda: self.on_play_source("A"))
         self.btn_play_b.clicked.connect(lambda: self.on_play_source("B"))
@@ -253,7 +540,7 @@ class MainWindow(QMainWindow):
         self.time_label = QLabel("00:00.000 / 00:00.000")
 
         loop_row = QHBoxLayout()
-        self.loop_enabled = QCheckBox("Loop")
+        self.loop_enabled = QCheckBox(self._t("loop"))
         self.loop_start = QSpinBox()
         self.loop_end = QSpinBox()
         self.loop_start.setRange(0, 36000)
@@ -264,9 +551,11 @@ class MainWindow(QMainWindow):
         self.loop_end.valueChanged.connect(self.on_loop_changed)
 
         loop_row.addWidget(self.loop_enabled)
-        loop_row.addWidget(QLabel("Start (s)"))
+        self.lbl_loop_start = QLabel(self._t("start_sec"))
+        self.lbl_loop_end = QLabel(self._t("end_sec"))
+        loop_row.addWidget(self.lbl_loop_start)
         loop_row.addWidget(self.loop_start)
-        loop_row.addWidget(QLabel("End (s)"))
+        loop_row.addWidget(self.lbl_loop_end)
         loop_row.addWidget(self.loop_end)
         loop_row.addStretch(1)
 
@@ -276,21 +565,22 @@ class MainWindow(QMainWindow):
         return g
 
     def _build_abx_group(self) -> QGroupBox:
-        g = QGroupBox("5) ABX Trials")
+        g = QGroupBox(self._t("group_abx"))
+        self.group_abx = g
         layout = QGridLayout(g)
 
-        self.trial_label = QLabel("Trial: 0")
-        self.score_label = QLabel("Score: 0/0")
-        self.pvalue_label = QLabel("p-value (one-tailed): 1.0000")
+        self.trial_label = QLabel(f"{self._t('trial')}: 0")
+        self.score_label = QLabel(f"{self._t('score')}: 0/0")
+        self.pvalue_label = QLabel(f"{self._t('pvalue')}: 1.0000")
 
-        self.answer_a = QPushButton("X = A")
-        self.answer_b = QPushButton("X = B")
+        self.answer_a = QPushButton(self._t("x_eq_a"))
+        self.answer_b = QPushButton(self._t("x_eq_b"))
         self.answer_a.clicked.connect(lambda: self.on_answer("A"))
         self.answer_b.clicked.connect(lambda: self.on_answer("B"))
 
-        self.export_json_btn = QPushButton("Export JSON")
-        self.export_csv_btn = QPushButton("Export CSV")
-        self.cancel_session_btn = QPushButton("Cancel ABX Session")
+        self.export_json_btn = QPushButton(self._t("export_json"))
+        self.export_csv_btn = QPushButton(self._t("export_csv"))
+        self.cancel_session_btn = QPushButton(self._t("cancel_abx"))
         self.export_json_btn.clicked.connect(self.on_export_json)
         self.export_csv_btn.clicked.connect(self.on_export_csv)
         self.cancel_session_btn.clicked.connect(self.on_cancel_session)
@@ -306,20 +596,19 @@ class MainWindow(QMainWindow):
         return g
 
     def _build_diagnostics_group(self) -> QGroupBox:
-        g = QGroupBox("6) Post-Session Diagnostics")
+        g = QGroupBox(self._t("group_diag"))
+        self.group_diag = g
         layout = QVBoxLayout(g)
 
         row = QHBoxLayout()
-        self.refresh_diag_btn = QPushButton("Show/Refresh Diagnostics")
+        self.refresh_diag_btn = QPushButton(self._t("refresh_diag"))
         self.refresh_diag_btn.clicked.connect(self._refresh_diagnostics_panel)
         row.addWidget(self.refresh_diag_btn)
         row.addStretch(1)
 
         self.diagnostics_view = QPlainTextEdit()
         self.diagnostics_view.setReadOnly(True)
-        self.diagnostics_view.setPlaceholderText(
-            "Diagnostics will appear here after preprocessing/trials."
-        )
+        self.diagnostics_view.setPlaceholderText(self._t("diag_placeholder"))
         self.diagnostics_view.setMinimumHeight(170)
 
         layout.addLayout(row)
@@ -331,7 +620,7 @@ class MainWindow(QMainWindow):
         self.br_a.clear()
         for br in self.catalog[cid].bitrate_options_kbps:
             if br <= 0:
-                self.br_a.addItem("N/A (unprocessed)", br)
+                self.br_a.addItem(self._t("na_unprocessed"), br)
             else:
                 self.br_a.addItem(f"{br} kbps", br)
 
@@ -340,7 +629,7 @@ class MainWindow(QMainWindow):
         self.br_b.clear()
         for br in self.catalog[cid].bitrate_options_kbps:
             if br <= 0:
-                self.br_b.addItem("N/A (unprocessed)", br)
+                self.br_b.addItem(self._t("na_unprocessed"), br)
             else:
                 self.br_b.addItem(f"{br} kbps", br)
 
@@ -357,7 +646,7 @@ class MainWindow(QMainWindow):
     def on_browse(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select WAV/FLAC",
+            self._t("input_placeholder"),
             "",
             "Audio Files (*.wav *.flac)",
         )
@@ -365,7 +654,8 @@ class MainWindow(QMainWindow):
             self.input_path.setText(file_path)
 
     def _set_status(self, text: str) -> None:
-        self.status_label.setText(f"Status: {text}")
+        self._last_status_raw = text
+        self.status_label.setText(f"{self._t('status_prefix')}{text}")
 
     def _prune_session_folders(self) -> None:
         if not SESSION_ROOT.exists():
@@ -391,12 +681,12 @@ class MainWindow(QMainWindow):
 
     def on_prepare(self) -> None:
         if self.prepare_thread is not None:
-            QMessageBox.information(self, "Already running", "Preprocessing is already running.")
+            QMessageBox.information(self, self._t("already_running_title"), self._t("already_running_text"))
             return
 
         src = self.input_path.text().strip()
         if not src:
-            QMessageBox.warning(self, "Input required", "Please select a WAV or FLAC file.")
+            QMessageBox.warning(self, self._t("input_required_title"), self._t("input_required_text"))
             return
 
         mode = self.sr_mode.currentData()
@@ -412,7 +702,7 @@ class MainWindow(QMainWindow):
         SESSION_ROOT.mkdir(parents=True, exist_ok=True)
         work_dir = SESSION_ROOT / f"session_{stamp}"
 
-        self._set_status("preprocessing and validating A/B...")
+        self._set_status(self._t("status_preparing"))
         self.prepare_btn.setEnabled(False)
         self.cancel_prepare_btn.setEnabled(True)
 
@@ -442,7 +732,7 @@ class MainWindow(QMainWindow):
         if self.prepare_thread is None:
             return
         self.cancel_prepare_btn.setEnabled(False)
-        self._set_status("cancelling preprocessing...")
+        self._set_status(self._t("status_cancelling_prepare"))
         self.pipeline.request_cancel()
 
     def _on_prepare_done(self, prepared, arr_a, arr_b) -> None:
@@ -482,13 +772,13 @@ class MainWindow(QMainWindow):
 
         validation = prepared.validation
         msg = (
-            f"ready | sr={prepared.target_sample_rate} Hz | duration={prepared.duration_seconds:.2f}s | "
+            f"{self._t('status_ready')} | sr={prepared.target_sample_rate} Hz | duration={prepared.duration_seconds:.2f}s | "
             f"loudness_diff={validation.loudness_diff_db:.3f} dB | lag={validation.alignment_lag_samples} samples"
         )
         if mapping_mode == "fixed":
-            msg += " | labels=fixed"
+            msg += f" | {self._t('labels_fixed')}"
         else:
-            msg += " | labels=blinded"
+            msg += f" | {self._t('labels_blinded')}"
         self._set_status(msg)
         self._refresh_diagnostics_panel()
 
@@ -542,11 +832,11 @@ class MainWindow(QMainWindow):
         self.player.set_x_mapping(x_source)
 
     def _on_prepare_failed(self, error_text: str) -> None:
-        QMessageBox.critical(self, "Preparation failed", error_text)
-        self._set_status("preprocessing failed")
+        QMessageBox.critical(self, self._t("prepare_failed_title"), error_text)
+        self._set_status(self._t("status_prepare_failed"))
 
     def _on_prepare_cancelled(self) -> None:
-        self._set_status("preprocessing cancelled")
+        self._set_status(self._t("status_prepare_cancelled"))
 
     def _cleanup_prepare_thread(self) -> None:
         if self.prepare_worker is not None:
@@ -571,7 +861,7 @@ class MainWindow(QMainWindow):
 
     def on_play_source(self, source: str) -> None:
         if self.prepared_session is None:
-            QMessageBox.warning(self, "Prepare first", "Please preprocess A/B first.")
+            QMessageBox.warning(self, self._t("prepare_first_title"), self._t("prepare_first_text"))
             return
 
         try:
@@ -579,7 +869,7 @@ class MainWindow(QMainWindow):
             self.player.set_active_source(resolved)
             self._start_stream_if_needed()
         except Exception as exc:
-            QMessageBox.critical(self, "Playback error", str(exc))
+            QMessageBox.critical(self, self._t("playback_error_title"), str(exc))
 
     def on_pause(self) -> None:
         self.player.stop()
@@ -621,7 +911,7 @@ class MainWindow(QMainWindow):
 
     def on_answer(self, answer: str) -> None:
         if self.prepared_session is None:
-            QMessageBox.warning(self, "Prepare first", "Please preprocess A/B first.")
+            QMessageBox.warning(self, self._t("prepare_first_title"), self._t("prepare_first_text"))
             return
 
         x_is_before = self.engine.current_x_is
@@ -680,34 +970,34 @@ class MainWindow(QMainWindow):
             )
 
         self._update_score_ui()
-        self._set_status("ABX session cancelled and reset")
+        self._set_status(self._t("status_session_cancelled"))
         self._refresh_diagnostics_panel()
 
     def _refresh_diagnostics_panel(self) -> None:
         if self.prepared_session is None:
-            self.diagnostics_view.setPlainText("No prepared session yet.")
+            self.diagnostics_view.setPlainText(self._t("diag_none"))
             return
 
         stats = self.engine.stats()
         mapping_mode = "fixed" if self._mapping_mode_pending == "fixed" else "blind_random"
 
         lines = [
-            "Session Summary",
-            f"Input: {self.prepared_session.input_file}",
-            f"Mode: {self.prepared_session.mode.value}",
-            f"Target SR: {self.prepared_session.target_sample_rate} Hz",
+            self._t("diag_session_summary"),
+            f"{self._t('diag_input')}: {self.prepared_session.input_file}",
+            f"{self._t('diag_mode')}: {self.prepared_session.mode.value}",
+            f"{self._t('diag_target_sr')}: {self.prepared_session.target_sample_rate} Hz",
             f"Codec A: {self.prepared_session.track_a.codec_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps",
             f"Codec B: {self.prepared_session.track_b.codec_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps",
             f"A/B Label Mapping Mode: {mapping_mode}",
-            f"Trials: {stats.total_trials}",
-            f"Correct: {stats.correct_trials}",
+            f"{self._t('diag_trials')}: {stats.total_trials}",
+            f"{self._t('diag_correct')}: {stats.correct_trials}",
             f"p-value (one-tailed): {stats.p_value_one_tailed:.6f}",
             "",
-            "Trial Details",
+            self._t("diag_trial_details"),
         ]
 
         if not self.logger.trials:
-            lines.append("(no trial answers submitted yet)")
+            lines.append(self._t("diag_no_trials"))
         else:
             for trial in self.logger.trials:
                 lines.append(
@@ -720,10 +1010,12 @@ class MainWindow(QMainWindow):
 
         # Keep mapping-revealing details far below so users do not see them accidentally.
         lines.extend([""] * 28)
-        lines.append("--- Mapping Audit (Scroll Down To Reveal) ---")
-        lines.append(f"Current Mapping: A->{self._display_to_source['A']} | B->{self._display_to_source['B']}")
+        lines.append(self._t("diag_mapping_audit"))
+        lines.append(
+            f"{self._t('diag_current_mapping')}: A->{self._display_to_source['A']} | B->{self._display_to_source['B']}"
+        )
         if not self.logger.trials:
-            lines.append("(no mapping audit entries yet)")
+            lines.append(self._t("diag_no_mapping_entries"))
         else:
             for trial in self.logger.trials:
                 x_source = trial.x_source if trial.x_source is not None else self._resolve_display_source(trial.x_is)
@@ -751,9 +1043,9 @@ class MainWindow(QMainWindow):
 
     def _update_score_ui(self) -> None:
         s = self.engine.stats()
-        self.trial_label.setText(f"Trial: {s.total_trials + 1}")
-        self.score_label.setText(f"Score: {s.correct_trials}/{s.total_trials}")
-        self.pvalue_label.setText(f"p-value (one-tailed): {s.p_value_one_tailed:.6f}")
+        self.trial_label.setText(f"{self._t('trial')}: {s.total_trials + 1}")
+        self.score_label.setText(f"{self._t('score')}: {s.correct_trials}/{s.total_trials}")
+        self.pvalue_label.setText(f"{self._t('pvalue')}: {s.p_value_one_tailed:.6f}")
 
     def _refresh_transport(self) -> None:
         if self.prepared_session is None:
@@ -778,31 +1070,41 @@ class MainWindow(QMainWindow):
 
     def on_export_json(self) -> None:
         if not self.logger.trials:
-            QMessageBox.information(self, "Nothing to export", "No trial results yet.")
+            QMessageBox.information(self, self._t("nothing_export_title"), self._t("nothing_export_text"))
             return
 
-        path, _ = QFileDialog.getSaveFileName(self, "Export JSON", "abx_results.json", "JSON (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            self._t("save_json"),
+            "abx_results.json",
+            self._t("json_filter"),
+        )
         if not path:
             return
         try:
             self.logger.export_json(path)
             self._set_status(f"exported JSON: {path}")
         except Exception as exc:
-            QMessageBox.critical(self, "Export failed", str(exc))
+            QMessageBox.critical(self, self._t("export_failed_title"), str(exc))
 
     def on_export_csv(self) -> None:
         if not self.logger.trials:
-            QMessageBox.information(self, "Nothing to export", "No trial results yet.")
+            QMessageBox.information(self, self._t("nothing_export_title"), self._t("nothing_export_text"))
             return
 
-        path, _ = QFileDialog.getSaveFileName(self, "Export CSV", "abx_results.csv", "CSV (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            self._t("save_csv"),
+            "abx_results.csv",
+            self._t("csv_filter"),
+        )
         if not path:
             return
         try:
             self.logger.export_csv(path)
             self._set_status(f"exported CSV: {path}")
         except Exception as exc:
-            QMessageBox.critical(self, "Export failed", str(exc))
+            QMessageBox.critical(self, self._t("export_failed_title"), str(exc))
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.prepare_thread is not None:

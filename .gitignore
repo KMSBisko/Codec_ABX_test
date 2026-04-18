@@ -31,3 +31,5 @@ exports/
 .DS_Store
 Thumbs.db
 run_abx.spec
+
+run_abx.exe

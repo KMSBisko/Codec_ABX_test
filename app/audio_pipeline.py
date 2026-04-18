@@ -41,6 +41,7 @@ class AudioPipeline:
         self.ffmpeg_bin = ffmpeg_bin
         self.ffprobe_bin = ffprobe_bin
         self.catalog = codec_catalog()
+        self._resample_filter = "aresample=resampler=soxr:precision=33"
         self._cancel_requested = False
         self._active_process: Optional[subprocess.Popen[str]] = None
         self._proc_lock = threading.Lock()
@@ -102,7 +103,17 @@ class AudioPipeline:
         self.ffmpeg_bin = ffmpeg_resolved
         self.ffprobe_bin = ffprobe_resolved
 
+    @staticmethod
+    def _windows_no_window_flags() -> Dict[str, object]:
+        if os.name != "nt":
+            return {}
+        create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if create_no_window:
+            return {"creationflags": int(create_no_window)}
+        return {}
+
     def _run(self, args: List[str]) -> None:
+        proc_flags = self._windows_no_window_flags()
         with self._proc_lock:
             self._active_process = subprocess.Popen(
                 args,
@@ -111,6 +122,7 @@ class AudioPipeline:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                **proc_flags,
             )
 
         stdout = ""
@@ -156,6 +168,28 @@ class AudioPipeline:
                 + stderr
             )
 
+    def _run_with_resample_fallback(self, args: List[str]) -> None:
+        previous_filter = self._resample_filter
+        try:
+            self._run(args)
+            return
+        except PipelineError as exc:
+            error_text = str(exc)
+            if (
+                previous_filter == "aresample=resampler=soxr:precision=33"
+                and "Requested resampling engine is unavailable" in error_text
+            ):
+                self._resample_filter = "aresample"
+                retry_args = [self._resample_filter if arg == previous_filter else arg for arg in args]
+                self._run(retry_args)
+                return
+            raise
+
+    def _resample_engine_name(self) -> str:
+        if "soxr" in self._resample_filter:
+            return "soxr"
+        return "default"
+
     def _probe(self, input_path: str) -> Dict[str, object]:
         args = [
             self.ffprobe_bin,
@@ -174,6 +208,7 @@ class AudioPipeline:
             text=True,
             encoding="utf-8",
             errors="replace",
+            **self._windows_no_window_flags(),
         )
         if proc.returncode != 0:
             raise PipelineError(proc.stderr or "ffprobe failed")
@@ -192,7 +227,7 @@ class AudioPipeline:
         out_wav: str,
         target_sr: int,
     ) -> None:
-        # Enforce explicit resample path. If source and target match this is a no-op.
+        # Enforce an explicit resample path. Fallback to default engine if soxr is unavailable.
         args = [
             self.ffmpeg_bin,
             "-y",
@@ -202,12 +237,13 @@ class AudioPipeline:
             "-c:a",
             "pcm_s16le",
             "-af",
-            "aresample=resampler=soxr:precision=33",
+            "__RESAMPLE_FILTER__",
             "-ar",
             str(target_sr),
             out_wav,
         ]
-        self._run(args)
+        args = [(self._resample_filter if arg == "__RESAMPLE_FILTER__" else arg) for arg in args]
+        self._run_with_resample_fallback(args)
 
     @staticmethod
     def _select_encoder_sample_rate(profile: CodecProfile, target_sr: int) -> int:
@@ -242,12 +278,16 @@ class AudioPipeline:
                 "-c:a",
                 "pcm_s16le",
                 "-af",
-                "aresample=resampler=soxr:precision=33",
+                "__RESAMPLE_FILTER__",
                 "-ar",
                 str(target_sr),
                 str(encoded_path),
             ]
-            self._run(passthrough_args)
+            passthrough_args = [
+                (self._resample_filter if arg == "__RESAMPLE_FILTER__" else arg)
+                for arg in passthrough_args
+            ]
+            self._run_with_resample_fallback(passthrough_args)
             return str(encoded_path), str(encoded_path)
 
         encode_sr = self._select_encoder_sample_rate(profile, target_sr)
@@ -263,15 +303,16 @@ class AudioPipeline:
             "-b:a",
             f"{bitrate_kbps}k",
             "-af",
-            "aresample=resampler=soxr:precision=33",
+            "__RESAMPLE_FILTER__",
             "-ar",
             str(encode_sr),
         ]
         encode_args.extend(profile.ffmpeg_extra_args)
         encode_args.append(str(encoded_path))
-        self._run(encode_args)
+        encode_args = [(self._resample_filter if arg == "__RESAMPLE_FILTER__" else arg) for arg in encode_args]
+        self._run_with_resample_fallback(encode_args)
 
-        # Decode through an explicit soxr path to avoid hidden quality variance.
+        # Decode through the same explicit resample path used for encode.
         decode_args = [
             self.ffmpeg_bin,
             "-y",
@@ -281,12 +322,13 @@ class AudioPipeline:
             "-c:a",
             "pcm_s16le",
             "-af",
-            "aresample=resampler=soxr:precision=33",
+            "__RESAMPLE_FILTER__",
             "-ar",
             str(target_sr),
             str(decoded_path),
         ]
-        self._run(decode_args)
+        decode_args = [(self._resample_filter if arg == "__RESAMPLE_FILTER__" else arg) for arg in decode_args]
+        self._run_with_resample_fallback(decode_args)
         return str(encoded_path), str(decoded_path)
 
     def _run_stage(
@@ -658,6 +700,7 @@ class AudioPipeline:
             target_sample_rate=target_sr,
             mode=mode,
             processing_mode=processing_mode_effective,
+            resample_engine_used=self._resample_engine_name(),
             duration_seconds=duration_seconds,
             channels=int(arr_a.shape[1]),
             pipeline_stage_count_a=stage_count_a,

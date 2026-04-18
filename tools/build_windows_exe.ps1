@@ -22,8 +22,10 @@ Write-Host "[2/4] Installing build dependency (PyInstaller)..."
 
 Write-Host "[3/4] Building one-file executable..."
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$workPath = "build/pyi_work_$stamp"
-$distPath = "dist/pyi_dist_$stamp"
+$tempRoot = Join-Path $env:TEMP "codec_abx_build_$stamp"
+$workPath = Join-Path $tempRoot "work"
+$distPath = Join-Path $tempRoot "dist"
+$finalExe = "run_abx.exe"
 
 # Use unique work/dist paths per build to avoid permission errors on locked folders.
 # NOTE: --specpath is only valid when generating a spec (not when building from one).
@@ -34,7 +36,15 @@ if (!(Test-Path $builtExe)) {
     throw "Build finished but executable not found at $builtExe"
 }
 
-Copy-Item -Force $builtExe "dist/run_abx.exe"
+if (Test-Path $finalExe) {
+    Remove-Item -Force $finalExe
+}
+Copy-Item -Force $builtExe $finalExe
+
+# Remove transient build artifacts so only the final EXE remains in project root.
+if (Test-Path $tempRoot) {
+    Remove-Item -Recurse -Force $tempRoot
+}
 
 Write-Host "[4/4] Build complete."
-Write-Host "Output: dist/run_abx.exe"
+Write-Host "Output: $finalExe"

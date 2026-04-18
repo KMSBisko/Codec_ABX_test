@@ -10,7 +10,6 @@ env/
 
 # Build and packaging artifacts
 build/
-dist/
 *.egg-info/
 *.spec.bak
 

@@ -84,6 +84,7 @@ class PreparedSession:
     target_sample_rate: int
     mode: SampleRateMode
     processing_mode: ProcessingMode
+    resample_engine_used: str
     duration_seconds: float
     channels: int
     pipeline_stage_count_a: int

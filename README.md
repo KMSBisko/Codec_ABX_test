@@ -9,7 +9,7 @@ Desktop ABX tool for local codec listening tests with strict preprocessing and v
 - Input: WAV/FLAC (FLAC converted to WAV)
 - Sample-rate modes:
   - Native sample-rate (default): keep source sample-rate as target
-  - Forced 48 kHz: explicit `soxr` resample before any codec stage
+  - Forced 48 kHz: explicit resample before any codec stage (prefer `soxr`, fallback to default engine if unavailable)
 - Offline codec pipeline:
   - Side A and Side B each run their own stage pipeline (1 to 4 stages per side)
   - Each stage: Encode -> decode -> pass PCM to next stage
@@ -99,17 +99,18 @@ powershell -ExecutionPolicy Bypass -File tools/build_windows_exe.ps1
 ```
 
 3. Share this file with users:
-  - `dist/run_abx.exe`
+  - `run_abx.exe`
 
 Notes:
 - End users do not need Python installed.
 - On first launch, some antivirus tools may scan the self-extracting exe.
 - If SmartScreen warns on unsigned apps, users may need to click "More info" -> "Run anyway".
+- Preprocess working files are created in the OS temp directory and are cleaned up automatically when preprocessing is cancelled/failed, replaced by a new preprocess run, or when the app closes.
 
 Build troubleshooting:
 - Run the build from a normal (non-admin) terminal.
-- If you previously hit `PermissionError` in `build/run_abx/...`, close any app/process that may lock files (Explorer preview, antivirus scan in progress), then run the build script again.
-- The script now uses a fresh PyInstaller work folder each run to avoid stale lock issues.
+- If you previously hit `PermissionError` during packaging, close any app/process that may lock files (Explorer preview, antivirus scan in progress), then run the build script again.
+- The script now builds in a temporary OS folder, then keeps only `run_abx.exe` in project root.
 
 ## Example Test File Included
 
@@ -121,6 +122,8 @@ python tools/generate_example_audio.py
 
 This creates:
 - `examples/example_abx_input.wav`
+
+This example file is optional and is not required when distributing only `run_abx.exe`.
 
 ## Basic Usage
 
@@ -155,15 +158,12 @@ This creates:
 - Use wired output or known stable exclusive-mode path when possible.
 - A/B/X are rendered offline before trials to reduce runtime variability.
 
-## Session Retention
+## Temporary Working Files
 
-The app auto-prunes local session folders under `sessions/`:
-- Deletes session folders older than 1 day
-- Keeps only the newest N session folders
-
-You can tune this in code:
-- `SESSION_MAX_KEEP`
-- `SESSION_MAX_AGE`
+The app uses a temporary working directory for preprocessing intermediates.
+- The folder is not kept as a persistent session log.
+- It is cleaned up automatically when preprocessing is cancelled/failed, replaced by a new preprocess run, or when the app closes.
+- If the process is forcibly terminated (for example, a crash or kill), the OS may leave temp leftovers that can be safely deleted manually.
 
 See `app/main.py`.
 
@@ -186,7 +186,7 @@ Công cụ ABX desktop để kiểm tra nghe codec cục bộ với các ràng b
 - Đầu vào: WAV/FLAC (FLAC sẽ được chuyển sang WAV)
 - Chế độ tần số lấy mẫu:
   - Native sample-rate (mặc định): giữ nguyên tần số lấy mẫu của nguồn
-  - Ép 48 kHz: resample `soxr` rõ ràng trước mọi stage codec
+  - Ép 48 kHz: resample rõ ràng trước mọi stage codec (ưu tiên `soxr`, tự fallback về engine mặc định nếu không khả dụng)
 - Pipeline codec offline:
   - Nhánh A và nhánh B mỗi nhánh chạy pipeline stage riêng (1 đến 4 stage cho mỗi nhánh)
   - Mỗi stage: Encode -> decode -> chuyển PCM sang stage tiếp theo
@@ -276,17 +276,18 @@ powershell -ExecutionPolicy Bypass -File tools/build_windows_exe.ps1
 ```
 
 3. Chia sẻ file này cho người dùng:
-  - `dist/run_abx.exe`
+  - `run_abx.exe`
 
 Ghi chú:
 - Người dùng cuối không cần cài Python.
 - Lần chạy đầu, một số phần mềm antivirus có thể quét file exe tự giải nén.
 - Nếu SmartScreen cảnh báo app chưa ký, người dùng có thể cần bấm "More info" -> "Run anyway".
+- File làm việc cho bước preprocess được tạo trong thư mục tạm của hệ điều hành và sẽ tự dọn khi preprocess bị hủy/thất bại, khi chạy preprocess mới, hoặc khi đóng ứng dụng.
 
 Khắc phục lỗi build:
 - Chạy lệnh build từ terminal thường (không cần quyền admin).
-- Nếu trước đó gặp `PermissionError` trong `build/run_abx/...`, hãy đóng các tiến trình có thể đang khóa file (Explorer preview, antivirus đang quét), rồi chạy lại script build.
-- Script hiện dùng thư mục làm việc PyInstaller mới ở mỗi lần chạy để tránh lỗi khóa file cũ.
+- Nếu trước đó gặp `PermissionError` khi đóng gói, hãy đóng các tiến trình có thể đang khóa file (Explorer preview, antivirus đang quét), rồi chạy lại script build.
+- Script hiện build trong thư mục tạm của hệ điều hành, sau đó chỉ giữ lại `run_abx.exe` ở thư mục gốc dự án.
 
 ## Có sẵn file test mẫu
 
@@ -298,6 +299,8 @@ python tools/generate_example_audio.py
 
 Lệnh này tạo:
 - `examples/example_abx_input.wav`
+
+File ví dụ này là tùy chọn và không cần thiết nếu bạn chỉ phát hành `run_abx.exe`.
 
 ## Cách sử dụng cơ bản
 
@@ -332,15 +335,12 @@ Lệnh này tạo:
 - Ưu tiên đường phát có dây hoặc đường exclusive mode ổn định.
 - A/B/X được render offline trước khi làm bài để giảm biến thiên thời gian chạy.
 
-## Chính sách lưu phiên
+## File làm việc tạm thời
 
-Ứng dụng tự dọn session cục bộ trong `sessions/`:
-- Xóa session cũ hơn 1 ngày
-- Chỉ giữ lại N session mới nhất
-
-Bạn có thể chỉnh trong code:
-- `SESSION_MAX_KEEP`
-- `SESSION_MAX_AGE`
+Ứng dụng dùng thư mục tạm để chứa file trung gian khi preprocess.
+- Thư mục này không được giữ như session log lâu dài.
+- Ứng dụng sẽ tự dọn khi preprocess bị hủy/thất bại, khi chạy preprocess mới, hoặc khi đóng ứng dụng.
+- Nếu tiến trình bị kết thúc cưỡng bức (ví dụ crash/kill), hệ điều hành có thể để lại file tạm; bạn có thể xóa thủ công an toàn.
 
 Xem `app/main.py`.
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import sys
 import random
 import shutil
+import tempfile
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -35,13 +37,6 @@ from .logger import ExperimentLogger
 from .models import PipelineStageConfig, ProcessingMode, SampleRateMode, TrialResult, codec_catalog
 from .player import SynchronizedABXPlayer, format_device_label
 
-
-# Session retention knobs (easy to tune):
-# - keep at most N newest session folders
-# - delete any session folder older than SESSION_MAX_AGE
-SESSION_ROOT = Path("sessions")
-SESSION_MAX_KEEP = 8
-SESSION_MAX_AGE = timedelta(days=1)
 
 TRANSLATIONS = {
     "en": {
@@ -137,6 +132,7 @@ TRANSLATIONS = {
         "diag_input": "Input",
         "diag_mode": "Mode",
         "diag_target_sr": "Target SR",
+        "diag_resample_engine": "Resample engine",
         "diag_trials": "Trials",
         "diag_correct": "Correct",
         "diag_trial_details": "Trial Details",
@@ -247,6 +243,7 @@ TRANSLATIONS = {
         "diag_input": "Đầu vào",
         "diag_mode": "Chế độ",
         "diag_target_sr": "Tần số mục tiêu",
+        "diag_resample_engine": "Engine resample",
         "diag_trials": "Số lượt",
         "diag_correct": "Đúng",
         "diag_trial_details": "Chi tiết lượt",
@@ -364,6 +361,7 @@ class MainWindow(QMainWindow):
         self._blind_base_swap_probability = 0.5
         self._blind_streak_probability_step = 0.07
         self._blind_max_swap_probability = 0.88
+        self._active_work_dir: Optional[Path] = None
 
         self._build_ui()
 
@@ -372,7 +370,6 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self._refresh_transport)
         self.timer.start()
 
-        self._prune_session_folders()
         self._load_devices()
 
     def _build_ui(self) -> None:
@@ -911,27 +908,16 @@ class MainWindow(QMainWindow):
         self._last_status_raw = text
         self.status_label.setText(f"{self._t('status_prefix')}{text}")
 
-    def _prune_session_folders(self) -> None:
-        if not SESSION_ROOT.exists():
+    def _cleanup_work_dir(self) -> None:
+        if self._active_work_dir is None:
             return
+        shutil.rmtree(self._active_work_dir, ignore_errors=True)
+        self._active_work_dir = None
 
-        now = datetime.now(timezone.utc)
-        dirs = [d for d in SESSION_ROOT.iterdir() if d.is_dir()]
-
-        # Remove expired sessions first.
-        for d in dirs:
-            try:
-                mtime = datetime.fromtimestamp(d.stat().st_mtime, tz=timezone.utc)
-            except OSError:
-                continue
-            if now - mtime > SESSION_MAX_AGE:
-                shutil.rmtree(d, ignore_errors=True)
-
-        # Keep only the newest N sessions.
-        remaining = [d for d in SESSION_ROOT.iterdir() if d.is_dir()]
-        remaining.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        for old_dir in remaining[SESSION_MAX_KEEP:]:
-            shutil.rmtree(old_dir, ignore_errors=True)
+    def _create_work_dir(self) -> Path:
+        work_dir = Path(tempfile.mkdtemp(prefix="codec_abx_"))
+        self._active_work_dir = work_dir
+        return work_dir
 
     def on_prepare(self) -> None:
         if self.prepare_thread is not None:
@@ -958,9 +944,8 @@ class MainWindow(QMainWindow):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._active_stamp = stamp
         self._mapping_mode_pending = str(self.ab_mapping_mode.currentData())
-        self._prune_session_folders()
-        SESSION_ROOT.mkdir(parents=True, exist_ok=True)
-        work_dir = SESSION_ROOT / f"session_{stamp}"
+        self._cleanup_work_dir()
+        work_dir = self._create_work_dir()
 
         self._set_status(self._t("status_preparing"))
         self.prepare_btn.setEnabled(False)
@@ -1022,6 +1007,7 @@ class MainWindow(QMainWindow):
                 "target_sample_rate": prepared.target_sample_rate,
                 "mode": prepared.mode.value,
                 "processing_mode": prepared.processing_mode.value,
+                "resample_engine_used": prepared.resample_engine_used,
                 "pipeline_stage_count_a": prepared.pipeline_stage_count_a,
                 "pipeline_stage_count_b": prepared.pipeline_stage_count_b,
                 "bandwidth_limit_a_enabled": prepared.bandwidth_limit_a_enabled,
@@ -1112,9 +1098,11 @@ class MainWindow(QMainWindow):
     def _on_prepare_failed(self, error_text: str) -> None:
         QMessageBox.critical(self, self._t("prepare_failed_title"), error_text)
         self._set_status(self._t("status_prepare_failed"))
+        self._cleanup_work_dir()
 
     def _on_prepare_cancelled(self) -> None:
         self._set_status(self._t("status_prepare_cancelled"))
+        self._cleanup_work_dir()
 
     def _cleanup_prepare_thread(self) -> None:
         if self.prepare_worker is not None:
@@ -1236,6 +1224,7 @@ class MainWindow(QMainWindow):
                     "target_sample_rate": self.prepared_session.target_sample_rate,
                     "mode": self.prepared_session.mode.value,
                     "processing_mode": self.prepared_session.processing_mode.value,
+                    "resample_engine_used": self.prepared_session.resample_engine_used,
                     "pipeline_stage_count_a": self.prepared_session.pipeline_stage_count_a,
                     "pipeline_stage_count_b": self.prepared_session.pipeline_stage_count_b,
                     "bandwidth_limit_a_enabled": self.prepared_session.bandwidth_limit_a_enabled,
@@ -1278,6 +1267,7 @@ class MainWindow(QMainWindow):
             f"{self._t('diag_bandwidth_limit_b')}: {self.prepared_session.bandwidth_limit_b_enabled}",
             f"{self._t('diag_bandwidth_cutoff_b')}: {self.prepared_session.bandwidth_limit_b_hz}",
             f"{self._t('diag_target_sr')}: {self.prepared_session.target_sample_rate} Hz",
+            f"{self._t('diag_resample_engine')}: {self.prepared_session.resample_engine_used}",
             f"{self._t('codec_a')}: {self.prepared_session.track_a.codec_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps",
             f"{self._t('codec_b')}: {self.prepared_session.track_b.codec_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps",
             f"{self._t('mapping_mode')}: {mapping_mode}",
@@ -1422,6 +1412,7 @@ class MainWindow(QMainWindow):
             self.prepare_thread.quit()
             self.prepare_thread.wait(1500)
         self.player.close()
+        self._cleanup_work_dir()
         super().closeEvent(event)
 
 

@@ -136,6 +136,12 @@ class SynchronizedABXPlayer:
             self._loop_start = min(max(0, s), max(0, self._length_samples - 1))
             self._loop_end = min(max(self._loop_start + 1, e), self._length_samples)
 
+            # When loop is enabled/updated, keep position inside [start, end).
+            # If current position is before start or at/after end, snap to start.
+            if self._loop_enabled and self._length_samples > 0:
+                if self._position_samples < self._loop_start or self._position_samples >= self._loop_end:
+                    self._position_samples = self._loop_start
+
     def _resolve_extra_settings(self, exclusive: bool):
         if not exclusive:
             return None

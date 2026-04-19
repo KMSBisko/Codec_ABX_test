@@ -51,7 +51,7 @@ TRANSLATIONS = {
         "lang_vietnamese": "Tiếng Việt",
         "status_idle": "Status: idle",
         "status_prefix": "Status: ",
-        "group_input": "1) Input",
+        "group_input": "Input",
         "input_placeholder": "Select WAV or FLAC",
         "browse": "Browse",
         "audio_file": "Audio file",
@@ -63,7 +63,7 @@ TRANSLATIONS = {
         "sr_force_48k": "Force 48 kHz (Bluetooth simulation)",
         "prepare": "Preprocess A/B",
         "cancel_prepare": "Cancel Preprocess",
-        "group_codec": "2) Codec Profiles",
+        "group_codec": "Codec Profiles",
         "pipeline_stages": "Pipeline stages",
         "stage_count": "Stage count",
         "stage_count_a": "Stage count A",
@@ -107,7 +107,7 @@ TRANSLATIONS = {
         "export_json": "Export JSON",
         "export_csv": "Export CSV",
         "cancel_abx": "Cancel ABX Session",
-        "group_diag": "6) Post-Session Diagnostics",
+        "group_diag": "Post-Session Diagnostics",
         "refresh_diag": "Show/Refresh Diagnostics",
         "diag_placeholder": "Diagnostics will appear here after preprocessing/trials.",
         "na_unprocessed": "N/A (unprocessed)",
@@ -171,7 +171,7 @@ TRANSLATIONS = {
         "lang_vietnamese": "Tiếng Việt",
         "status_idle": "Trạng thái: chờ",
         "status_prefix": "Trạng thái: ",
-        "group_input": "1) Đầu vào",
+        "group_input": "Đầu vào",
         "input_placeholder": "Chọn WAV hoặc FLAC",
         "browse": "Chọn file",
         "audio_file": "Tệp âm thanh",
@@ -183,7 +183,7 @@ TRANSLATIONS = {
         "sr_force_48k": "Ép 48 kHz (mô phỏng Bluetooth)",
         "prepare": "Tiền xử lý A/B",
         "cancel_prepare": "Hủy tiền xử lý",
-        "group_codec": "2) Cấu hình Codec",
+        "group_codec": "Cấu hình Codec",
         "pipeline_stages": "Các tầng pipeline",
         "stage_count": "Số tầng",
         "stage_count_a": "Số tầng A",
@@ -227,7 +227,7 @@ TRANSLATIONS = {
         "export_json": "Xuất JSON",
         "export_csv": "Xuất CSV",
         "cancel_abx": "Hủy phiên ABX",
-        "group_diag": "6) Chẩn đoán sau phiên",
+        "group_diag": "Chẩn đoán sau phiên",
         "refresh_diag": "Hiện/Làm mới chẩn đoán",
         "diag_placeholder": "Thông tin chẩn đoán sẽ hiển thị ở đây sau khi tiền xử lý/làm bài.",
         "na_unprocessed": "Không áp dụng (gốc)",
@@ -1495,12 +1495,37 @@ class MainWindow(QMainWindow):
         self.loop_enabled = QCheckBox(self._t("loop"))
         self.loop_start = QSpinBox()
         self.loop_end = QSpinBox()
+        self.loop_start.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.loop_end.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.loop_start.setRange(0, 36000)
         self.loop_end.setRange(0, 36000)
         self.loop_end.setValue(30)
         self.loop_enabled.stateChanged.connect(self.on_loop_changed)
         self.loop_start.valueChanged.connect(self.on_loop_changed)
         self.loop_end.valueChanged.connect(self.on_loop_changed)
+
+        self.loop_start_dec = QToolButton()
+        self.loop_start_dec.setText("-")
+        self.loop_start_dec.clicked.connect(lambda: self.loop_start.stepBy(-1))
+        self.loop_start_inc = QToolButton()
+        self.loop_start_inc.setText("+")
+        self.loop_start_inc.clicked.connect(lambda: self.loop_start.stepBy(1))
+
+        self.loop_end_dec = QToolButton()
+        self.loop_end_dec.setText("-")
+        self.loop_end_dec.clicked.connect(lambda: self.loop_end.stepBy(-1))
+        self.loop_end_inc = QToolButton()
+        self.loop_end_inc.setText("+")
+        self.loop_end_inc.clicked.connect(lambda: self.loop_end.stepBy(1))
+
+        for btn in (
+            self.loop_start_dec,
+            self.loop_start_inc,
+            self.loop_end_dec,
+            self.loop_end_inc,
+        ):
+            btn.setAutoRaise(False)
+            btn.setFixedWidth(26)
 
         self.lbl_loop_start = QLabel(self._t("start_sec"))
         self.lbl_loop_end = QLabel(self._t("end_sec"))
@@ -1510,8 +1535,12 @@ class MainWindow(QMainWindow):
         transport_row.addWidget(self.loop_enabled)
         transport_row.addWidget(self.lbl_loop_start)
         transport_row.addWidget(self.loop_start)
+        transport_row.addWidget(self.loop_start_dec)
+        transport_row.addWidget(self.loop_start_inc)
         transport_row.addWidget(self.lbl_loop_end)
         transport_row.addWidget(self.loop_end)
+        transport_row.addWidget(self.loop_end_dec)
+        transport_row.addWidget(self.loop_end_inc)
 
         layout.addLayout(transport_row)
 

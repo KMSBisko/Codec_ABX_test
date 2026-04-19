@@ -11,11 +11,14 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -25,8 +28,11 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
+    QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -82,7 +88,8 @@ TRANSLATIONS = {
         "device": "Device",
         "refresh_devices": "Refresh devices",
         "exclusive": "Request exclusive mode when available",
-        "group_playback": "4) Playback + Shared Timeline",
+        "group_playback": "ABX tools",
+        "group_abx_tools": "ABX tools",
         "play_a": "Play A",
         "play_b": "Play B",
         "play_x": "Play X",
@@ -146,9 +153,17 @@ TRANSLATIONS = {
         "diag_pipeline_a_stages": "Pipeline A stages",
         "diag_pipeline_b_stages": "Pipeline B stages",
         "diag_no_trials": "(no trial answers submitted yet)",
-        "diag_mapping_audit": "--- Mapping Audit (Scroll Down To Reveal) ---",
+        "diag_mapping_audit": "--- Mapping Audit ---",
         "diag_current_mapping": "Current Mapping",
         "diag_no_mapping_entries": "(no mapping audit entries yet)",
+        "zoom": "Zoom",
+        "zoom_out": "A-",
+        "zoom_reset": "100%",
+        "zoom_in": "A+",
+        "dark_mode": "Dark mode (default)",
+        "oled_mode": "OLED mode",
+        "fullscreen_enter": "Fullscreen",
+        "fullscreen_exit": "Windowed",
     },
     "vi": {
         "window_title": "Trình kiểm tra ABX Codec",
@@ -193,7 +208,8 @@ TRANSLATIONS = {
         "device": "Thiết bị",
         "refresh_devices": "Làm mới thiết bị",
         "exclusive": "Yêu cầu chế độ độc quyền nếu hỗ trợ",
-        "group_playback": "4) Phát + Timeline chung",
+        "group_playback": "Công cụ ABX",
+        "group_abx_tools": "Công cụ ABX",
         "play_a": "Phát A",
         "play_b": "Phát B",
         "play_x": "Phát X",
@@ -257,9 +273,17 @@ TRANSLATIONS = {
         "diag_pipeline_a_stages": "Các tầng pipeline A",
         "diag_pipeline_b_stages": "Các tầng pipeline B",
         "diag_no_trials": "(chưa có lượt trả lời nào)",
-        "diag_mapping_audit": "--- Kiểm tra ánh xạ (cuộn xuống để xem) ---",
+        "diag_mapping_audit": "--- Kiểm tra ánh xạ ---",
         "diag_current_mapping": "Ánh xạ hiện tại",
         "diag_no_mapping_entries": "(chưa có dữ liệu ánh xạ)",
+        "zoom": "Thu phóng",
+        "zoom_out": "A-",
+        "zoom_reset": "100%",
+        "zoom_in": "A+",
+        "dark_mode": "Chế độ tối (mặc định)",
+        "oled_mode": "Chế độ OLED",
+        "fullscreen_enter": "Toàn màn hình",
+        "fullscreen_exit": "Cửa sổ",
     },
 }
 
@@ -332,7 +356,12 @@ class MainWindow(QMainWindow):
         self.current_language = "en"
         self._last_status_raw = "idle"
         self.setWindowTitle(self._t("window_title"))
-        self.resize(1050, 700)
+
+        self._base_font_size = 11
+        self._zoom_percent = 100
+        self._zoom_min = 80
+        self._zoom_max = 170
+        self._shortcuts: list[QShortcut] = []
 
         self.pipeline = AudioPipeline()
         self.player = SynchronizedABXPlayer()
@@ -364,6 +393,10 @@ class MainWindow(QMainWindow):
         self._active_work_dir: Optional[Path] = None
 
         self._build_ui()
+        self._apply_startup_geometry()
+        self._apply_visual_theme()
+        self._apply_zoom()
+        self._install_shortcuts()
 
         self.timer = QTimer(self)
         self.timer.setInterval(50)
@@ -372,32 +405,669 @@ class MainWindow(QMainWindow):
 
         self._load_devices()
 
+    def _apply_startup_geometry(self) -> None:
+        # Prefer a tall launch ratio, but adapt to each monitor's available work area.
+        min_w, min_h = 980, 760
+        self.setMinimumSize(min_w, min_h)
+
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1200, 1000)
+            return
+
+        available = screen.availableGeometry()
+        max_w = max(min_w, int(available.width() * 0.95))
+        max_h = max(min_h, int(available.height() * 0.95))
+
+        preferred_ratio_h_per_w = 1.5
+        preferred_h = int(available.height() * 0.9)
+        preferred_w = int(preferred_h / preferred_ratio_h_per_w)
+
+        width = max(min_w, min(preferred_w, max_w))
+        height = int(width * preferred_ratio_h_per_w)
+
+        if height > max_h:
+            height = max_h
+            width = int(height / preferred_ratio_h_per_w)
+
+        if width < min_w or height < min_h:
+            width = max(min_w, min(max_w, int(available.width() * 0.85)))
+            height = max(min_h, min(max_h, int(available.height() * 0.9)))
+
+        width = int(width * 0.8)
+        height = int(height * 0.86)
+        width = max(min_w, min(width, max_w))
+        height = max(min_h, min(height, max_h))
+
+        self.resize(width, height)
+
     def _build_ui(self) -> None:
         root = QWidget(self)
-        main_layout = QVBoxLayout(root)
+        root.setObjectName("rootPanel")
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        container.setObjectName("contentPanel")
+        main_layout = QVBoxLayout(container)
+        main_layout.setContentsMargins(24, 20, 24, 24)
+        main_layout.setSpacing(14)
 
         lang_row = QHBoxLayout()
+        lang_row.setSpacing(10)
         self.btn_lang_en = QPushButton(self._t("lang_english"))
         self.btn_lang_vi = QPushButton(self._t("lang_vietnamese"))
+        self.btn_lang_en.setObjectName("langButton")
+        self.btn_lang_vi.setObjectName("langButton")
         self.btn_lang_en.clicked.connect(lambda: self._set_language("en"))
         self.btn_lang_vi.clicked.connect(lambda: self._set_language("vi"))
         lang_row.addWidget(self.btn_lang_en)
         lang_row.addWidget(self.btn_lang_vi)
         lang_row.addStretch(1)
+
+        self.lbl_zoom = QLabel(self._t("zoom"))
+        self.btn_zoom_out = QPushButton(self._t("zoom_out"))
+        self.btn_zoom_reset = QPushButton(self._t("zoom_reset"))
+        self.btn_zoom_in = QPushButton(self._t("zoom_in"))
+        self.btn_zoom_out.clicked.connect(lambda: self._set_zoom_percent(self._zoom_percent - 10))
+        self.btn_zoom_reset.clicked.connect(lambda: self._set_zoom_percent(100))
+        self.btn_zoom_in.clicked.connect(lambda: self._set_zoom_percent(self._zoom_percent + 10))
+
+        self.dark_mode_toggle = QCheckBox(self._t("dark_mode"))
+        self.dark_mode_toggle.setChecked(True)
+        self.dark_mode_toggle.stateChanged.connect(self._on_theme_mode_changed)
+        self.oled_mode_toggle = QCheckBox(self._t("oled_mode"))
+        self.oled_mode_toggle.setChecked(False)
+        self.oled_mode_toggle.stateChanged.connect(self._on_theme_mode_changed)
+
+        self.btn_fullscreen = QPushButton(self._t("fullscreen_enter"))
+        self.btn_fullscreen.clicked.connect(self._toggle_fullscreen)
+
+        lang_row.addWidget(self.lbl_zoom)
+        lang_row.addWidget(self.btn_zoom_out)
+        lang_row.addWidget(self.btn_zoom_reset)
+        lang_row.addWidget(self.btn_zoom_in)
+        lang_row.addWidget(self.dark_mode_toggle)
+        lang_row.addWidget(self.oled_mode_toggle)
+        lang_row.addWidget(self.btn_fullscreen)
         main_layout.addLayout(lang_row)
 
         main_layout.addWidget(self._build_input_group())
         main_layout.addWidget(self._build_codec_group())
-        main_layout.addWidget(self._build_output_group())
         main_layout.addWidget(self._build_playback_group())
-        main_layout.addWidget(self._build_abx_group())
         main_layout.addWidget(self._build_diagnostics_group())
 
         self.status_label = QLabel(self._t("status_idle"))
         self.status_label.setWordWrap(True)
+        self.status_label.setObjectName("statusBarLabel")
         main_layout.addWidget(self.status_label)
+        main_layout.addStretch(1)
 
+        scroll.setWidget(container)
+        root_layout.addWidget(scroll)
         self.setCentralWidget(root)
+
+    def _install_shortcuts(self) -> None:
+        def add_shortcut(seq: str, handler) -> None:
+            shortcut = QShortcut(QKeySequence(seq), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(handler)
+            self._shortcuts.append(shortcut)
+
+        add_shortcut("Ctrl++", lambda: self._set_zoom_percent(self._zoom_percent + 10))
+        add_shortcut("Ctrl+=", lambda: self._set_zoom_percent(self._zoom_percent + 10))
+        add_shortcut("Ctrl+Plus", lambda: self._set_zoom_percent(self._zoom_percent + 10))
+        add_shortcut("Ctrl+-", lambda: self._set_zoom_percent(self._zoom_percent - 10))
+        add_shortcut("Ctrl+_", lambda: self._set_zoom_percent(self._zoom_percent - 10))
+        add_shortcut("Ctrl+Minus", lambda: self._set_zoom_percent(self._zoom_percent - 10))
+        add_shortcut("Ctrl+0", lambda: self._set_zoom_percent(100))
+        add_shortcut("F11", self._toggle_fullscreen)
+
+    def _on_theme_mode_changed(self, _state: int) -> None:
+        self._apply_visual_theme()
+
+    def _apply_visual_theme(self) -> None:
+        dark_mode_enabled = bool(getattr(self, "dark_mode_toggle", None) and self.dark_mode_toggle.isChecked())
+        oled_mode_enabled = bool(getattr(self, "oled_mode_toggle", None) and self.oled_mode_toggle.isChecked())
+        if dark_mode_enabled:
+            if oled_mode_enabled:
+                stylesheet = """
+                QWidget {
+                    background-color: #000000;
+                    color: #ffffff;
+                    font-family: "Segoe UI Variable", "Segoe UI", "Trebuchet MS";
+                }
+                QWidget#contentPanel {
+                    background: #000000;
+                }
+                QGroupBox {
+                    border: 1px solid #2b2b2b;
+                    border-radius: 12px;
+                    margin-top: 10px;
+                    padding: 14px 12px 12px 12px;
+                    background-color: #050505;
+                    font-weight: 600;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 12px;
+                    padding: 0 6px;
+                    color: #ffffff;
+                    background-color: rgba(0, 0, 0, 0);
+                }
+                QLabel {
+                    background: transparent;
+                }
+                QLabel#statusBarLabel {
+                    border: 1px solid #2f2f2f;
+                    border-radius: 8px;
+                    background-color: #0d0d0d;
+                    padding: 8px 10px;
+                    font-weight: 500;
+                }
+                QPushButton {
+                    background-color: #5865F2;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 9px;
+                    padding: 8px 12px;
+                    font-weight: 600;
+                    min-height: 30px;
+                }
+                QPushButton#langButton {
+                    background-color: #3a3f4b;
+                }
+                QPushButton:hover {
+                    background-color: #4752c4;
+                }
+                QPushButton:pressed {
+                    background-color: #3c45a5;
+                }
+                QPushButton:disabled {
+                    background-color: #2f3240;
+                    color: #9ca1b2;
+                }
+                QToolButton {
+                    background-color: #5865F2;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 7px;
+                    min-width: 28px;
+                    min-height: 26px;
+                    font-weight: 700;
+                }
+                QToolButton:hover {
+                    background-color: #4752c4;
+                }
+                QToolButton:pressed {
+                    background-color: #3c45a5;
+                }
+                QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {
+                    border: 1px solid #2f3136;
+                    border-radius: 8px;
+                    padding: 6px 8px;
+                    background-color: #111214;
+                    color: #ffffff;
+                    selection-background-color: #5865F2;
+                }
+                QComboBox::drop-down {
+                    border: none;
+                    width: 24px;
+                }
+                QSpinBox {
+                    padding-right: 24px;
+                }
+                QSpinBox::up-button {
+                    subcontrol-origin: border;
+                    subcontrol-position: top right;
+                    width: 18px;
+                    border-left: 1px solid #2f3136;
+                    border-bottom: 1px solid #2f3136;
+                    background: #18191c;
+                }
+                QSpinBox::down-button {
+                    subcontrol-origin: border;
+                    subcontrol-position: bottom right;
+                    width: 18px;
+                    border-left: 1px solid #2f3136;
+                    background: #18191c;
+                }
+                QSpinBox::up-button:hover,
+                QSpinBox::down-button:hover {
+                    background: #23252b;
+                }
+                QSpinBox::up-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
+                    border-left: 5px solid transparent;
+                    border-right: 5px solid transparent;
+                    border-bottom: 7px solid #ffffff;
+                }
+                QSpinBox::down-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
+                    border-left: 5px solid transparent;
+                    border-right: 5px solid transparent;
+                    border-top: 7px solid #ffffff;
+                }
+                QCheckBox {
+                    spacing: 8px;
+                    color: #ffffff;
+                }
+                QCheckBox::indicator {
+                    width: 18px;
+                    height: 18px;
+                    border-radius: 4px;
+                    border: 2px solid #8e9297;
+                    background: #000000;
+                }
+                QCheckBox::indicator:checked {
+                    background: #5865F2;
+                    border: 2px solid #ffffff;
+                }
+                QCheckBox#exclusiveModeCheck {
+                    border: 1px solid #3b3f45;
+                    border-radius: 8px;
+                    background-color: #0d0e10;
+                    padding: 8px 10px;
+                    font-weight: 600;
+                }
+                QSlider::groove:horizontal {
+                    border: none;
+                    background: #2f3136;
+                    height: 8px;
+                    border-radius: 4px;
+                }
+                QSlider::handle:horizontal {
+                    background: #5865F2;
+                    width: 16px;
+                    margin: -4px 0;
+                    border-radius: 8px;
+                }
+                QScrollBar:vertical {
+                    width: 12px;
+                    background: transparent;
+                }
+                QScrollBar::handle:vertical {
+                    border-radius: 6px;
+                    background: #3d4047;
+                    min-height: 28px;
+                }
+                """
+            else:
+                stylesheet = """
+                QWidget {
+                    background-color: #1e1f22;
+                    color: #dbdee1;
+                    font-family: "Segoe UI Variable", "Segoe UI", "Trebuchet MS";
+                }
+                QWidget#contentPanel {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                                                stop:0 #1f2023, stop:1 #2b2d31);
+                }
+                QGroupBox {
+                    border: 1px solid #3f4147;
+                    border-radius: 12px;
+                    margin-top: 10px;
+                    padding: 14px 12px 12px 12px;
+                    background-color: #2b2d31;
+                    font-weight: 600;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 12px;
+                    padding: 0 6px;
+                    color: #f2f3f5;
+                    background-color: rgba(0, 0, 0, 0);
+                }
+                QLabel {
+                    background: transparent;
+                }
+                QLabel#statusBarLabel {
+                    border: 1px solid #43464d;
+                    border-radius: 8px;
+                    background-color: #232428;
+                    padding: 8px 10px;
+                    font-weight: 500;
+                }
+                QPushButton {
+                    background-color: #5865F2;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 9px;
+                    padding: 8px 12px;
+                    font-weight: 600;
+                    min-height: 30px;
+                }
+                QPushButton#langButton {
+                    background-color: #4a4d55;
+                }
+                QPushButton:hover {
+                    background-color: #4752c4;
+                }
+                QPushButton:pressed {
+                    background-color: #3c45a5;
+                }
+                QPushButton:disabled {
+                    background-color: #3e4048;
+                    color: #a6abbb;
+                }
+                QToolButton {
+                    background-color: #5865F2;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 7px;
+                    min-width: 28px;
+                    min-height: 26px;
+                    font-weight: 700;
+                }
+                QToolButton:hover {
+                    background-color: #4752c4;
+                }
+                QToolButton:pressed {
+                    background-color: #3c45a5;
+                }
+                QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {
+                    border: 1px solid #4a4d55;
+                    border-radius: 8px;
+                    padding: 6px 8px;
+                    background-color: #1e1f22;
+                    color: #f2f3f5;
+                    selection-background-color: #5865F2;
+                }
+                QComboBox::drop-down {
+                    border: none;
+                    width: 24px;
+                }
+                QSpinBox {
+                    padding-right: 24px;
+                }
+                QSpinBox::up-button {
+                    subcontrol-origin: border;
+                    subcontrol-position: top right;
+                    width: 18px;
+                    border-left: 1px solid #4a4d55;
+                    border-bottom: 1px solid #4a4d55;
+                    background: #17181b;
+                }
+                QSpinBox::down-button {
+                    subcontrol-origin: border;
+                    subcontrol-position: bottom right;
+                    width: 18px;
+                    border-left: 1px solid #4a4d55;
+                    background: #17181b;
+                }
+                QSpinBox::up-button:hover,
+                QSpinBox::down-button:hover {
+                    background: #232428;
+                }
+                QSpinBox::up-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
+                    border-left: 5px solid transparent;
+                    border-right: 5px solid transparent;
+                    border-bottom: 7px solid #f2f3f5;
+                }
+                QSpinBox::down-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
+                    border-left: 5px solid transparent;
+                    border-right: 5px solid transparent;
+                    border-top: 7px solid #f2f3f5;
+                }
+                QCheckBox {
+                    spacing: 8px;
+                    color: #f2f3f5;
+                }
+                QCheckBox::indicator {
+                    width: 18px;
+                    height: 18px;
+                    border-radius: 4px;
+                    border: 2px solid #9da1a8;
+                    background: #1b1c20;
+                }
+                QCheckBox::indicator:checked {
+                    background: #5865F2;
+                    border: 2px solid #f2f3f5;
+                }
+                QCheckBox#exclusiveModeCheck {
+                    border: 1px solid #4b4f56;
+                    border-radius: 8px;
+                    background-color: #232428;
+                    padding: 8px 10px;
+                    font-weight: 600;
+                }
+                QSlider::groove:horizontal {
+                    border: none;
+                    background: #3f4147;
+                    height: 8px;
+                    border-radius: 4px;
+                }
+                QSlider::handle:horizontal {
+                    background: #5865F2;
+                    width: 16px;
+                    margin: -4px 0;
+                    border-radius: 8px;
+                }
+                QScrollBar:vertical {
+                    width: 12px;
+                    background: transparent;
+                }
+                QScrollBar::handle:vertical {
+                    border-radius: 6px;
+                    background: #4a4d55;
+                    min-height: 28px;
+                }
+                """
+        else:
+            stylesheet = """
+            QWidget {
+                background-color: #e9edf2;
+                color: #1f2a3a;
+                font-family: "Segoe UI Variable", "Segoe UI", "Trebuchet MS";
+            }
+            QWidget#contentPanel {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                                            stop:0 #f7fbff, stop:1 #eef2ff);
+            }
+            QGroupBox {
+                border: 1px solid #cfd8e8;
+                border-radius: 12px;
+                margin-top: 10px;
+                padding: 14px 12px 12px 12px;
+                background-color: rgba(255, 255, 255, 0.93);
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #203354;
+                background-color: rgba(255, 255, 255, 0);
+            }
+            QLabel {
+                background: transparent;
+            }
+            QLabel#statusBarLabel {
+                border: 1px solid #c7d1e3;
+                border-radius: 8px;
+                background-color: rgba(255, 255, 255, 0.86);
+                padding: 8px 10px;
+                font-weight: 500;
+            }
+            QPushButton {
+                background-color: #2f6db2;
+                color: white;
+                border: none;
+                border-radius: 9px;
+                padding: 8px 12px;
+                font-weight: 600;
+                min-height: 30px;
+            }
+            QPushButton#langButton {
+                background-color: #3f4f66;
+            }
+            QPushButton:hover {
+                background-color: #265c97;
+            }
+            QPushButton:pressed {
+                background-color: #1f4f82;
+            }
+            QPushButton:disabled {
+                background-color: #8d9bb0;
+                color: #e6ebf3;
+            }
+            QToolButton {
+                background-color: #2f6db2;
+                color: #ffffff;
+                border: none;
+                border-radius: 7px;
+                min-width: 28px;
+                min-height: 26px;
+                font-weight: 700;
+            }
+            QToolButton:hover {
+                background-color: #265c97;
+            }
+            QToolButton:pressed {
+                background-color: #1f4f82;
+            }
+            QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {
+                border: 1px solid #bcc8dd;
+                border-radius: 8px;
+                padding: 6px 8px;
+                background-color: #ffffff;
+                selection-background-color: #2f6db2;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 24px;
+            }
+            QSpinBox {
+                padding-right: 24px;
+            }
+            QSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 18px;
+                border-left: 1px solid #bcc8dd;
+                border-bottom: 1px solid #bcc8dd;
+                background: #edf2fb;
+            }
+            QSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 18px;
+                border-left: 1px solid #bcc8dd;
+                background: #edf2fb;
+            }
+            QSpinBox::up-button:hover,
+            QSpinBox::down-button:hover {
+                background: #e4ecf9;
+            }
+            QSpinBox::up-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-bottom: 7px solid #1f2a3a;
+            }
+            QSpinBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 7px solid #1f2a3a;
+            }
+            QCheckBox {
+                spacing: 8px;
+                color: #1f2a3a;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border: 2px solid #5b7698;
+                background: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background: #2f6db2;
+                border: 2px solid #1f4f82;
+            }
+            QCheckBox#exclusiveModeCheck {
+                border: 1px solid #c4d1e5;
+                border-radius: 8px;
+                background-color: rgba(255, 255, 255, 0.92);
+                padding: 8px 10px;
+                font-weight: 600;
+            }
+            QSlider::groove:horizontal {
+                border: none;
+                background: #d3dbe8;
+                height: 8px;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #2f6db2;
+                width: 16px;
+                margin: -4px 0;
+                border-radius: 8px;
+            }
+            QScrollBar:vertical {
+                width: 12px;
+                background: transparent;
+            }
+            QScrollBar::handle:vertical {
+                border-radius: 6px;
+                background: #a8b6cd;
+                min-height: 28px;
+            }
+            """
+        self.setStyleSheet(stylesheet)
+
+    def _set_zoom_percent(self, percent: int) -> None:
+        clamped = max(self._zoom_min, min(self._zoom_max, int(percent)))
+        if clamped == self._zoom_percent:
+            return
+        self._zoom_percent = clamped
+        self._apply_zoom()
+
+    def _apply_zoom(self) -> None:
+        scaled = round(self._base_font_size * self._zoom_percent / 100.0, 1)
+        app = QApplication.instance()
+        if app is not None:
+            font = QFont("Segoe UI Variable")
+            font.setPointSizeF(scaled)
+            app.setFont(font)
+            app.setStyleSheet("")
+        # Re-apply theme after changing app font to ensure style consistency.
+        self._apply_visual_theme()
+        if hasattr(self, "btn_zoom_reset"):
+            self.btn_zoom_reset.setText(f"{self._zoom_percent}%")
+
+    def _toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+        self._update_fullscreen_button_text()
+
+    def _update_fullscreen_button_text(self) -> None:
+        if not hasattr(self, "btn_fullscreen"):
+            return
+        key = "fullscreen_exit" if self.isFullScreen() else "fullscreen_enter"
+        self.btn_fullscreen.setText(self._t(key))
 
     def _t(self, key: str) -> str:
         return TRANSLATIONS.get(self.current_language, TRANSLATIONS["en"]).get(
@@ -445,8 +1115,13 @@ class MainWindow(QMainWindow):
         self.btn_browse.setText(self._t("browse"))
         self.lbl_audio_file.setText(self._t("audio_file"))
         self.lbl_sample_rate_mode.setText(self._t("sample_rate_mode"))
+        self.lbl_device.setText(self._t("device"))
+        self.btn_refresh_devices.setText(self._t("refresh_devices"))
+        self.exclusive_mode.setText(self._t("exclusive"))
         self.prepare_btn.setText(self._t("prepare"))
         self.cancel_prepare_btn.setText(self._t("cancel_prepare"))
+        self.export_json_btn.setText(self._t("export_json"))
+        self.export_csv_btn.setText(self._t("export_csv"))
         self._populate_sr_mode_items()
 
         self.group_codec.setTitle(self._t("group_codec"))
@@ -477,12 +1152,7 @@ class MainWindow(QMainWindow):
         self._refresh_bitrate_b()
         self._refresh_pipeline_controls()
 
-        self.group_output.setTitle(self._t("group_output"))
-        self.lbl_device.setText(self._t("device"))
-        self.btn_refresh_devices.setText(self._t("refresh_devices"))
-        self.exclusive_mode.setText(self._t("exclusive"))
-
-        self.group_playback.setTitle(self._t("group_playback"))
+        self.group_playback.setTitle(self._t("group_abx_tools"))
         self.btn_play_a.setText(self._t("play_a"))
         self.btn_play_b.setText(self._t("play_b"))
         self.btn_play_x.setText(self._t("play_x"))
@@ -492,17 +1162,19 @@ class MainWindow(QMainWindow):
         self.lbl_loop_start.setText(self._t("start_sec"))
         self.lbl_loop_end.setText(self._t("end_sec"))
 
-        self.group_abx.setTitle(self._t("group_abx"))
         self.answer_a.setText(self._t("x_eq_a"))
         self.answer_b.setText(self._t("x_eq_b"))
-        self.export_json_btn.setText(self._t("export_json"))
-        self.export_csv_btn.setText(self._t("export_csv"))
         self.cancel_session_btn.setText(self._t("cancel_abx"))
         self._update_score_ui()
 
         self.group_diag.setTitle(self._t("group_diag"))
-        self.refresh_diag_btn.setText(self._t("refresh_diag"))
         self.diagnostics_view.setPlaceholderText(self._t("diag_placeholder"))
+        self.lbl_zoom.setText(self._t("zoom"))
+        self.btn_zoom_out.setText(self._t("zoom_out"))
+        self.btn_zoom_in.setText(self._t("zoom_in"))
+        self.dark_mode_toggle.setText(self._t("dark_mode"))
+        self.oled_mode_toggle.setText(self._t("oled_mode"))
+        self._update_fullscreen_button_text()
 
         self._set_status(self._last_status_raw)
         self._refresh_diagnostics_panel()
@@ -511,37 +1183,80 @@ class MainWindow(QMainWindow):
         g = QGroupBox(self._t("group_input"))
         self.group_input = g
         layout = QGridLayout(g)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(8)
 
         self.input_path = QLineEdit()
         self.input_path.setPlaceholderText(self._t("input_placeholder"))
+        self.input_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.btn_browse = QPushButton(self._t("browse"))
         self.btn_browse.clicked.connect(self.on_browse)
 
         self.sr_mode = QComboBox()
         self._populate_sr_mode_items()
+        self.sr_mode.setMinimumWidth(240)
+        self.sr_mode.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         self.prepare_btn = QPushButton(self._t("prepare"))
         self.prepare_btn.clicked.connect(self.on_prepare)
         self.cancel_prepare_btn = QPushButton(self._t("cancel_prepare"))
         self.cancel_prepare_btn.setEnabled(False)
         self.cancel_prepare_btn.clicked.connect(self.on_cancel_prepare)
+        self.export_json_btn = QPushButton(self._t("export_json"))
+        self.export_csv_btn = QPushButton(self._t("export_csv"))
+        self.export_json_btn.clicked.connect(self.on_export_json)
+        self.export_csv_btn.clicked.connect(self.on_export_csv)
+
+        self.device_combo = QComboBox()
+        self.device_combo.setMinimumWidth(280)
+        self.device_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_refresh_devices = QPushButton(self._t("refresh_devices"))
+        self.btn_refresh_devices.clicked.connect(self._load_devices)
+        self.exclusive_mode = QCheckBox(self._t("exclusive"))
+        self.exclusive_mode.setObjectName("exclusiveModeCheck")
 
         self.lbl_audio_file = QLabel(self._t("audio_file"))
         self.lbl_sample_rate_mode = QLabel(self._t("sample_rate_mode"))
+        self.lbl_device = QLabel(self._t("device"))
 
-        layout.addWidget(self.lbl_audio_file, 0, 0)
-        layout.addWidget(self.input_path, 0, 1)
-        layout.addWidget(self.btn_browse, 0, 2)
-        layout.addWidget(self.lbl_sample_rate_mode, 1, 0)
-        layout.addWidget(self.sr_mode, 1, 1, 1, 2)
-        layout.addWidget(self.prepare_btn, 2, 0, 1, 3)
-        layout.addWidget(self.cancel_prepare_btn, 3, 0, 1, 3)
+        row_top = QHBoxLayout()
+        row_top.setSpacing(10)
+        row_top.addWidget(self.lbl_audio_file)
+        row_top.addWidget(self.input_path, 1)
+        row_top.addWidget(self.btn_browse)
+        row_top.addWidget(self.lbl_sample_rate_mode)
+        row_top.addWidget(self.sr_mode)
+
+        row_actions = QHBoxLayout()
+        row_actions.setSpacing(10)
+        row_actions.addWidget(self.prepare_btn)
+        row_actions.addWidget(self.cancel_prepare_btn)
+        row_actions.addWidget(self.export_json_btn)
+        row_actions.addWidget(self.export_csv_btn)
+
+        row_output = QHBoxLayout()
+        row_output.setSpacing(10)
+        row_output.addWidget(self.lbl_device)
+        row_output.addWidget(self.device_combo, 1)
+        row_output.addWidget(self.btn_refresh_devices)
+        row_output.addWidget(self.exclusive_mode)
+
+        row_bottom = QHBoxLayout()
+        row_bottom.setSpacing(14)
+        row_bottom.addLayout(row_actions)
+        row_bottom.addStretch(1)
+        row_bottom.addLayout(row_output, 1)
+
+        layout.addLayout(row_top, 0, 0)
+        layout.addLayout(row_bottom, 1, 0)
         return g
 
     def _build_codec_group(self) -> QGroupBox:
         g = QGroupBox(self._t("group_codec"))
         self.group_codec = g
         layout = QGridLayout(g)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(8)
 
         self.codec_a = QComboBox()
         self.codec_b = QComboBox()
@@ -583,15 +1298,35 @@ class MainWindow(QMainWindow):
 
         self.lbl_stage_count_a = QLabel(self._t("stage_count_a"))
         self.stage_count_a = QSpinBox()
+        self.stage_count_a.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.stage_count_a.setRange(1, 4)
         self.stage_count_a.setValue(1)
         self.stage_count_a.valueChanged.connect(self._on_stage_count_changed)
+        self.stage_count_a_dec = QToolButton()
+        self.stage_count_a_dec.setText("-")
+        self.stage_count_a_dec.clicked.connect(lambda: self.stage_count_a.stepBy(-1))
+        self.stage_count_a_inc = QToolButton()
+        self.stage_count_a_inc.setText("+")
+        self.stage_count_a_inc.clicked.connect(lambda: self.stage_count_a.stepBy(1))
+        for btn in (self.stage_count_a_dec, self.stage_count_a_inc):
+            btn.setAutoRaise(False)
+            btn.setFixedWidth(28)
 
         self.lbl_stage_count_b = QLabel(self._t("stage_count_b"))
         self.stage_count_b = QSpinBox()
+        self.stage_count_b.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.stage_count_b.setRange(1, 4)
         self.stage_count_b.setValue(1)
         self.stage_count_b.valueChanged.connect(self._on_stage_count_changed)
+        self.stage_count_b_dec = QToolButton()
+        self.stage_count_b_dec.setText("-")
+        self.stage_count_b_dec.clicked.connect(lambda: self.stage_count_b.stepBy(-1))
+        self.stage_count_b_inc = QToolButton()
+        self.stage_count_b_inc.setText("+")
+        self.stage_count_b_inc.clicked.connect(lambda: self.stage_count_b.stepBy(1))
+        for btn in (self.stage_count_b_dec, self.stage_count_b_inc):
+            btn.setAutoRaise(False)
+            btn.setFixedWidth(28)
 
         self.bandwidth_limit_a_enabled = QCheckBox(self._t("bandwidth_limit_a"))
         self.bandwidth_limit_b_enabled = QCheckBox(self._t("bandwidth_limit_b"))
@@ -610,17 +1345,41 @@ class MainWindow(QMainWindow):
         self.bandwidth_cutoff_b.addItem("16 kHz", 16000)
         self.bandwidth_cutoff_b.addItem("18 kHz", 18000)
 
-        layout.addWidget(self.lbl_stage_count_a, 3, 0)
-        layout.addWidget(self.stage_count_a, 3, 1)
-        layout.addWidget(self.bandwidth_limit_a_enabled, 3, 2)
-        layout.addWidget(self.lbl_bandwidth_cutoff_a, 3, 3)
-        layout.addWidget(self.bandwidth_cutoff_a, 3, 4)
+        stage_count_a_box = QHBoxLayout()
+        stage_count_a_box.setSpacing(6)
+        stage_count_a_box.addWidget(self.stage_count_a)
+        stage_count_a_box.addWidget(self.stage_count_a_dec)
+        stage_count_a_box.addWidget(self.stage_count_a_inc)
 
-        layout.addWidget(self.lbl_stage_count_b, 4, 0)
-        layout.addWidget(self.stage_count_b, 4, 1)
-        layout.addWidget(self.bandwidth_limit_b_enabled, 4, 2)
-        layout.addWidget(self.lbl_bandwidth_cutoff_b, 4, 3)
-        layout.addWidget(self.bandwidth_cutoff_b, 4, 4)
+        stage_count_b_box = QHBoxLayout()
+        stage_count_b_box.setSpacing(6)
+        stage_count_b_box.addWidget(self.stage_count_b)
+        stage_count_b_box.addWidget(self.stage_count_b_dec)
+        stage_count_b_box.addWidget(self.stage_count_b_inc)
+
+        stage_controls_row = QHBoxLayout()
+        stage_controls_row.setSpacing(12)
+
+        side_a_controls = QHBoxLayout()
+        side_a_controls.setSpacing(8)
+        side_a_controls.addWidget(self.lbl_stage_count_a)
+        side_a_controls.addLayout(stage_count_a_box)
+        side_a_controls.addWidget(self.bandwidth_limit_a_enabled)
+        side_a_controls.addWidget(self.lbl_bandwidth_cutoff_a)
+        side_a_controls.addWidget(self.bandwidth_cutoff_a)
+
+        side_b_controls = QHBoxLayout()
+        side_b_controls.setSpacing(8)
+        side_b_controls.addWidget(self.lbl_stage_count_b)
+        side_b_controls.addLayout(stage_count_b_box)
+        side_b_controls.addWidget(self.bandwidth_limit_b_enabled)
+        side_b_controls.addWidget(self.lbl_bandwidth_cutoff_b)
+        side_b_controls.addWidget(self.bandwidth_cutoff_b)
+
+        stage_controls_row.addLayout(side_a_controls, 1)
+        stage_controls_row.addLayout(side_b_controls, 1)
+
+        layout.addLayout(stage_controls_row, 3, 0, 1, 5)
 
         self.lbl_pipeline_stages = QLabel(self._t("pipeline_stages"))
         self.lbl_side_a = QLabel(self._t("side_a"))
@@ -629,13 +1388,13 @@ class MainWindow(QMainWindow):
         self.lbl_stage_bitrate_a = QLabel(self._t("stage_bitrate"))
         self.lbl_stage_codec_b = QLabel(self._t("stage_codec"))
         self.lbl_stage_bitrate_b = QLabel(self._t("stage_bitrate"))
-        layout.addWidget(self.lbl_pipeline_stages, 5, 0)
-        layout.addWidget(self.lbl_side_a, 5, 1)
-        layout.addWidget(self.lbl_side_b, 5, 3)
-        layout.addWidget(self.lbl_stage_codec_a, 6, 1)
-        layout.addWidget(self.lbl_stage_bitrate_a, 6, 2)
-        layout.addWidget(self.lbl_stage_codec_b, 6, 3)
-        layout.addWidget(self.lbl_stage_bitrate_b, 6, 4)
+        layout.addWidget(self.lbl_pipeline_stages, 4, 0)
+        layout.addWidget(self.lbl_side_a, 4, 1)
+        layout.addWidget(self.lbl_side_b, 4, 3)
+        layout.addWidget(self.lbl_stage_codec_a, 5, 1)
+        layout.addWidget(self.lbl_stage_bitrate_a, 5, 2)
+        layout.addWidget(self.lbl_stage_codec_b, 5, 3)
+        layout.addWidget(self.lbl_stage_bitrate_b, 5, 4)
 
         for idx in range(4):
             stage_label = QLabel(f"{self._t('stage_label')} {idx + 1}")
@@ -649,6 +1408,12 @@ class MainWindow(QMainWindow):
 
             br_a = QComboBox()
             br_b = QComboBox()
+            codec_a.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            codec_b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            codec_a.setMinimumWidth(240)
+            codec_b.setMinimumWidth(240)
+            br_a.setMinimumWidth(160)
+            br_b.setMinimumWidth(160)
 
             codec_a.currentIndexChanged.connect(lambda _=None, i=idx: self._refresh_pipeline_bitrate("A", i))
             codec_b.currentIndexChanged.connect(lambda _=None, i=idx: self._refresh_pipeline_bitrate("B", i))
@@ -662,12 +1427,17 @@ class MainWindow(QMainWindow):
             self._refresh_pipeline_bitrate("A", idx)
             self._refresh_pipeline_bitrate("B", idx)
 
-            row = 7 + idx
+            row = 6 + idx
             layout.addWidget(stage_label, row, 0)
             layout.addWidget(codec_a, row, 1)
             layout.addWidget(br_a, row, 2)
             layout.addWidget(codec_b, row, 3)
             layout.addWidget(br_b, row, 4)
+
+        layout.setColumnStretch(1, 4)
+        layout.setColumnStretch(2, 2)
+        layout.setColumnStretch(3, 4)
+        layout.setColumnStretch(4, 2)
 
         self._refresh_pipeline_controls()
         return g
@@ -682,6 +1452,7 @@ class MainWindow(QMainWindow):
         self.btn_refresh_devices.clicked.connect(self._load_devices)
 
         self.exclusive_mode = QCheckBox(self._t("exclusive"))
+        self.exclusive_mode.setObjectName("exclusiveModeCheck")
         self.lbl_device = QLabel(self._t("device"))
 
         layout.addWidget(self.lbl_device, 0, 0)
@@ -691,7 +1462,7 @@ class MainWindow(QMainWindow):
         return g
 
     def _build_playback_group(self) -> QGroupBox:
-        g = QGroupBox(self._t("group_playback"))
+        g = QGroupBox(self._t("group_abx_tools"))
         self.group_playback = g
         layout = QVBoxLayout(g)
 
@@ -719,7 +1490,8 @@ class MainWindow(QMainWindow):
 
         self.time_label = QLabel("00:00.000 / 00:00.000")
 
-        loop_row = QHBoxLayout()
+        transport_row = QHBoxLayout()
+        transport_row.setSpacing(10)
         self.loop_enabled = QCheckBox(self._t("loop"))
         self.loop_start = QSpinBox()
         self.loop_end = QSpinBox()
@@ -730,25 +1502,20 @@ class MainWindow(QMainWindow):
         self.loop_start.valueChanged.connect(self.on_loop_changed)
         self.loop_end.valueChanged.connect(self.on_loop_changed)
 
-        loop_row.addWidget(self.loop_enabled)
         self.lbl_loop_start = QLabel(self._t("start_sec"))
         self.lbl_loop_end = QLabel(self._t("end_sec"))
-        loop_row.addWidget(self.lbl_loop_start)
-        loop_row.addWidget(self.loop_start)
-        loop_row.addWidget(self.lbl_loop_end)
-        loop_row.addWidget(self.loop_end)
-        loop_row.addStretch(1)
 
-        layout.addWidget(self.timeline)
-        layout.addWidget(self.time_label)
-        layout.addLayout(loop_row)
-        return g
+        transport_row.addWidget(self.timeline, 1)
+        transport_row.addWidget(self.time_label)
+        transport_row.addWidget(self.loop_enabled)
+        transport_row.addWidget(self.lbl_loop_start)
+        transport_row.addWidget(self.loop_start)
+        transport_row.addWidget(self.lbl_loop_end)
+        transport_row.addWidget(self.loop_end)
 
-    def _build_abx_group(self) -> QGroupBox:
-        g = QGroupBox(self._t("group_abx"))
-        self.group_abx = g
-        layout = QGridLayout(g)
+        layout.addLayout(transport_row)
 
+        abx_row = QGridLayout()
         self.trial_label = QLabel(f"{self._t('trial')}: 0")
         self.score_label = QLabel(f"{self._t('score')}: 0/0")
         self.pvalue_label = QLabel(f"{self._t('pvalue')}: 1.0000")
@@ -758,21 +1525,16 @@ class MainWindow(QMainWindow):
         self.answer_a.clicked.connect(lambda: self.on_answer("A"))
         self.answer_b.clicked.connect(lambda: self.on_answer("B"))
 
-        self.export_json_btn = QPushButton(self._t("export_json"))
-        self.export_csv_btn = QPushButton(self._t("export_csv"))
         self.cancel_session_btn = QPushButton(self._t("cancel_abx"))
-        self.export_json_btn.clicked.connect(self.on_export_json)
-        self.export_csv_btn.clicked.connect(self.on_export_csv)
         self.cancel_session_btn.clicked.connect(self.on_cancel_session)
 
-        layout.addWidget(self.trial_label, 0, 0)
-        layout.addWidget(self.score_label, 0, 1)
-        layout.addWidget(self.pvalue_label, 0, 2)
-        layout.addWidget(self.answer_a, 1, 0)
-        layout.addWidget(self.answer_b, 1, 1)
-        layout.addWidget(self.export_json_btn, 2, 0)
-        layout.addWidget(self.export_csv_btn, 2, 1)
-        layout.addWidget(self.cancel_session_btn, 2, 2)
+        abx_row.addWidget(self.trial_label, 0, 0)
+        abx_row.addWidget(self.score_label, 0, 1)
+        abx_row.addWidget(self.pvalue_label, 0, 2)
+        abx_row.addWidget(self.answer_a, 1, 0)
+        abx_row.addWidget(self.answer_b, 1, 1)
+        abx_row.addWidget(self.cancel_session_btn, 1, 2)
+        layout.addLayout(abx_row)
         return g
 
     def _build_diagnostics_group(self) -> QGroupBox:
@@ -780,18 +1542,11 @@ class MainWindow(QMainWindow):
         self.group_diag = g
         layout = QVBoxLayout(g)
 
-        row = QHBoxLayout()
-        self.refresh_diag_btn = QPushButton(self._t("refresh_diag"))
-        self.refresh_diag_btn.clicked.connect(self._refresh_diagnostics_panel)
-        row.addWidget(self.refresh_diag_btn)
-        row.addStretch(1)
-
         self.diagnostics_view = QPlainTextEdit()
         self.diagnostics_view.setReadOnly(True)
         self.diagnostics_view.setPlaceholderText(self._t("diag_placeholder"))
         self.diagnostics_view.setMinimumHeight(170)
 
-        layout.addLayout(row)
         layout.addWidget(self.diagnostics_view)
         return g
 
@@ -1308,8 +2063,7 @@ class MainWindow(QMainWindow):
                     + f" | Correct={trial.correct}"
                 )
 
-        # Keep mapping-revealing details far below so users do not see them accidentally.
-        lines.extend([""] * 28)
+        lines.append("")
         lines.append(self._t("diag_mapping_audit"))
         lines.append(
             f"{self._t('diag_current_mapping')}: A->{self._display_to_source['A']} | B->{self._display_to_source['B']}"
@@ -1414,6 +2168,11 @@ class MainWindow(QMainWindow):
         self.player.close()
         self._cleanup_work_dir()
         super().closeEvent(event)
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        if event.type() == event.Type.WindowStateChange:
+            self._update_fullscreen_button_text()
+        super().changeEvent(event)
 
 
 def main() -> None:

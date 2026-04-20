@@ -77,10 +77,6 @@ class AudioPipeline:
         if configured_path.is_file():
             return str(configured_path)
 
-        by_path = shutil.which(configured)
-        if by_path:
-            return by_path
-
         roots: List[Path] = []
         packaged_root = self._packaged_root()
         if packaged_root is not None:
@@ -95,6 +91,10 @@ class AudioPipeline:
                 candidate = root / name
                 if candidate.is_file():
                     return str(candidate)
+
+        by_path = shutil.which(configured)
+        if by_path:
+            return by_path
 
         return None
 

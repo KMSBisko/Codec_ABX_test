@@ -24,6 +24,7 @@ class CodecProfile:
     bitrate_options_kbps: List[int]
     simulated_label: Optional[str] = None
     ffmpeg_extra_args: List[str] = field(default_factory=list)
+    ffmpeg_decode_input_format: Optional[str] = None
     passthrough_unprocessed: bool = False
     pipeline_noop: bool = False
 
@@ -89,6 +90,10 @@ class PreparedSession:
     channels: int
     pipeline_stage_count_a: int
     pipeline_stage_count_b: int
+    requested_codec_a_id: str
+    requested_codec_a_name: str
+    requested_codec_b_id: str
+    requested_codec_b_name: str
     track_a: PreparedTrack
     track_b: PreparedTrack
     validation: SessionValidation
@@ -145,6 +150,13 @@ def codec_catalog() -> Dict[str, CodecProfile]:
             container_ext="m4a",
             bitrate_options_kbps=[48, 64, 80, 96, 128, 160, 192, 256, 320],
         ),
+        "ogg_vorbis": CodecProfile(
+            codec_id="ogg_vorbis",
+            display_name="Ogg Vorbis",
+            ffmpeg_encoder="libvorbis",
+            container_ext="ogg",
+            bitrate_options_kbps=[64, 96, 128, 160, 192, 256, 320],
+        ),
         "sbc": CodecProfile(
             codec_id="sbc",
             display_name="SBC",
@@ -152,6 +164,34 @@ def codec_catalog() -> Dict[str, CodecProfile]:
             container_ext="sbc",
             bitrate_options_kbps=[96, 128, 160, 192, 256, 320],
             ffmpeg_extra_args=["-f", "sbc"],
+            ffmpeg_decode_input_format="sbc",
+        ),
+        "aptx": CodecProfile(
+            codec_id="aptx",
+            display_name="aptX",
+            ffmpeg_encoder="aptx",
+            container_ext="aptx",
+            bitrate_options_kbps=[352],
+            ffmpeg_extra_args=["-f", "aptx"],
+            ffmpeg_decode_input_format="aptx",
+        ),
+        "aptx_hd": CodecProfile(
+            codec_id="aptx_hd",
+            display_name="aptX HD",
+            ffmpeg_encoder="aptx_hd",
+            container_ext="aptx_hd",
+            bitrate_options_kbps=[576],
+            ffmpeg_extra_args=["-f", "aptx_hd"],
+            ffmpeg_decode_input_format="aptx_hd",
+        ),
+        "ldac": CodecProfile(
+            codec_id="ldac",
+            display_name="LDAC",
+            ffmpeg_encoder="libldac",
+            container_ext="ldac",
+            bitrate_options_kbps=[330, 660, 990],
+            ffmpeg_extra_args=["-f", "ldac"],
+            ffmpeg_decode_input_format="ldac",
         ),
         "sim_aptx": CodecProfile(
             codec_id="sim_aptx",

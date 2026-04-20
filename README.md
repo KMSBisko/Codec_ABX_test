@@ -47,16 +47,22 @@ Direct:
 - No-op / Lossless passthrough (pipeline stage)
 - Opus (`libopus`)
 - AAC (`aac`)
+- Ogg Vorbis (`libvorbis`)
 - SBC (`sbc` if your ffmpeg build supports it)
+- aptX (`aptx`)
+- aptX HD (`aptx_hd`)
+- LDAC (`libldac`, only if your ffmpeg build includes it)
 
-Simulated Bluetooth labels (implemented through available codecs/bitrates):
-- Simulated aptX
-- Simulated aptX HD
-- Simulated LDAC
+Fallback behavior:
+- Simulated profiles are no longer exposed as selectable UI options.
+- If `aptx`, `aptx_hd`, or `libldac` encoders are unavailable in your ffmpeg build,
+  the pipeline automatically falls back internally to AAC-based simulation at the selected bitrate.
 
 Additional bitrate notes:
-- Lower bitrate options are available for direct codecs (Opus/AAC/SBC) to stress-test artifact audibility.
-- Simulated LDAC now uses AAC at 330/660/990 kbps for more reliable high-bitrate preprocessing across ffmpeg builds.
+- Lower bitrate options are available for direct codecs (Opus/AAC/Ogg Vorbis/SBC) to stress-test artifact audibility.
+- Real aptX/aptX HD are configured to their typical constant-bitrate profiles (352/576 kbps).
+- Real LDAC is available at 330/660/990 kbps when `libldac` is present.
+- Internal fallback simulation uses AAC bitrate-matched profiles for aptX/aptX HD/LDAC when needed.
 
 ## Prerequisites
 
@@ -68,6 +74,7 @@ Check:
 ```powershell
 ffmpeg -version
 ffprobe -version
+ffmpeg -hide_banner -encoders | Select-String -Pattern "aptx|ldac|libldac|libvorbis" -CaseSensitive:$false
 ```
 
 ## Install
@@ -224,16 +231,22 @@ Trực tiếp:
 - No-op / Lossless passthrough (pipeline stage)
 - Opus (`libopus`)
 - AAC (`aac`)
+- Ogg Vorbis (`libvorbis`)
 - SBC (`sbc`, nếu bản ffmpeg của bạn hỗ trợ)
+- aptX (`aptx`)
+- aptX HD (`aptx_hd`)
+- LDAC (`libldac`, chỉ khi bản ffmpeg của bạn có tích hợp)
 
-Nhãn Bluetooth mô phỏng (được triển khai bằng codec/bitrate khả dụng):
-- Simulated aptX
-- Simulated aptX HD
-- Simulated LDAC
+Hành vi fallback:
+- Các profile mô phỏng không còn hiển thị để chọn trực tiếp trong UI.
+- Nếu encoder `aptx`, `aptx_hd` hoặc `libldac` không có trong bản ffmpeg,
+  pipeline sẽ tự động fallback nội bộ sang mô phỏng dựa trên AAC theo đúng bitrate đã chọn.
 
 Ghi chú bitrate bổ sung:
-- Có thêm các mức bitrate thấp cho codec trực tiếp (Opus/AAC/SBC) để stress-test khả năng nghe ra artefact.
-- Simulated LDAC hiện dùng AAC ở 330/660/990 kbps để tiền xử lý bitrate cao ổn định hơn trên nhiều bản ffmpeg.
+- Có thêm các mức bitrate thấp cho codec trực tiếp (Opus/AAC/Ogg Vorbis/SBC) để stress-test khả năng nghe ra artefact.
+- aptX/aptX HD thật được cấu hình theo profile CBR điển hình (352/576 kbps).
+- LDAC thật có các mức 330/660/990 kbps khi có `libldac`.
+- Fallback mô phỏng nội bộ dùng profile AAC khớp bitrate cho aptX/aptX HD/LDAC khi cần.
 
 ## Yêu cầu trước khi chạy
 
@@ -245,6 +258,7 @@ Kiểm tra:
 ```powershell
 ffmpeg -version
 ffprobe -version
+ffmpeg -hide_banner -encoders | Select-String -Pattern "aptx|ldac|libldac|libvorbis" -CaseSensitive:$false
 ```
 
 ## Cài đặt

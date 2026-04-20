@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pyloudnorm as pyln
@@ -42,9 +43,15 @@ class AudioPipeline:
         self.ffprobe_bin = ffprobe_bin
         self.catalog = codec_catalog()
         self._resample_filter = "aresample=resampler=soxr:precision=33"
+        self._available_encoders: Optional[Set[str]] = None
         self._cancel_requested = False
         self._active_process: Optional[subprocess.Popen[str]] = None
         self._proc_lock = threading.Lock()
+        self._codec_fallback_map: Dict[str, str] = {
+            "aptx": "sim_aptx",
+            "aptx_hd": "sim_aptx_hd",
+            "ldac": "sim_ldac",
+        }
 
     def request_cancel(self) -> None:
         self._cancel_requested = True
@@ -102,6 +109,61 @@ class AudioPipeline:
 
         self.ffmpeg_bin = ffmpeg_resolved
         self.ffprobe_bin = ffprobe_resolved
+        self._refresh_available_encoders()
+
+    def _refresh_available_encoders(self) -> None:
+        args = [self.ffmpeg_bin, "-hide_banner", "-encoders"]
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **self._windows_no_window_flags(),
+        )
+        if proc.returncode != 0:
+            self._available_encoders = None
+            return
+
+        encoders: Set[str] = set()
+        for line in proc.stdout.splitlines():
+            match = re.match(r"^\s*[VASFS.]\S*\s+([a-zA-Z0-9_]+)\s+", line)
+            if match:
+                encoders.add(match.group(1).lower())
+        self._available_encoders = encoders
+
+    def _require_encoder(self, profile: CodecProfile) -> None:
+        available = self._is_encoder_available(profile.ffmpeg_encoder)
+        if available is False:
+            raise PipelineError(
+                f"This ffmpeg build does not provide encoder '{profile.ffmpeg_encoder}' for "
+                f"profile '{profile.ui_name}'."
+            )
+
+    def _is_encoder_available(self, encoder_name: str) -> Optional[bool]:
+        if self._available_encoders is None:
+            self._refresh_available_encoders()
+        if self._available_encoders is None:
+            return None
+        return encoder_name.lower() in self._available_encoders
+
+    def _resolve_runtime_profile(self, requested_profile: CodecProfile) -> CodecProfile:
+        if requested_profile.passthrough_unprocessed or requested_profile.pipeline_noop:
+            return requested_profile
+
+        available = self._is_encoder_available(requested_profile.ffmpeg_encoder)
+        if available is not False:
+            return requested_profile
+
+        fallback_id = self._codec_fallback_map.get(requested_profile.codec_id)
+        if fallback_id is None:
+            return requested_profile
+
+        fallback_profile = self.catalog.get(fallback_id)
+        if fallback_profile is None:
+            return requested_profile
+
+        return fallback_profile
 
     @staticmethod
     def _windows_no_window_flags() -> Dict[str, object]:
@@ -253,6 +315,17 @@ class AudioPipeline:
             if target_sr in supported:
                 return target_sr
             return 48000
+
+        # aptX and aptX HD are typically used at 44.1/48 kHz.
+        if profile.ffmpeg_encoder in ("aptx", "aptx_hd"):
+            if target_sr in (44100, 48000):
+                return target_sr
+            return 48000
+
+        # Keep LDAC bitrates aligned to the common 48 kHz profile set.
+        if profile.ffmpeg_encoder == "libldac":
+            return 48000
+
         return target_sr
 
     def _encode_decode(
@@ -263,11 +336,12 @@ class AudioPipeline:
         bitrate_kbps: int,
         target_sr: int,
         label: str,
-    ) -> Tuple[str, str]:
-        encoded_path = work_dir / f"{label}.{profile.container_ext}"
+    ) -> Tuple[str, str, CodecProfile]:
+        runtime_profile = self._resolve_runtime_profile(profile)
+        encoded_path = work_dir / f"{label}.{runtime_profile.container_ext}"
         decoded_path = work_dir / f"{label}_decoded.wav"
 
-        if profile.passthrough_unprocessed:
+        if runtime_profile.passthrough_unprocessed:
             # Keep a deterministic PCM render for reference-track ABX comparisons.
             passthrough_args = [
                 self.ffmpeg_bin,
@@ -288,9 +362,11 @@ class AudioPipeline:
                 for arg in passthrough_args
             ]
             self._run_with_resample_fallback(passthrough_args)
-            return str(encoded_path), str(encoded_path)
+            return str(encoded_path), str(encoded_path), runtime_profile
 
-        encode_sr = self._select_encoder_sample_rate(profile, target_sr)
+        self._require_encoder(runtime_profile)
+
+        encode_sr = self._select_encoder_sample_rate(runtime_profile, target_sr)
 
         encode_args = [
             self.ffmpeg_bin,
@@ -299,7 +375,7 @@ class AudioPipeline:
             wav_in,
             "-vn",
             "-c:a",
-            profile.ffmpeg_encoder,
+            runtime_profile.ffmpeg_encoder,
             "-b:a",
             f"{bitrate_kbps}k",
             "-af",
@@ -307,29 +383,32 @@ class AudioPipeline:
             "-ar",
             str(encode_sr),
         ]
-        encode_args.extend(profile.ffmpeg_extra_args)
+        encode_args.extend(runtime_profile.ffmpeg_extra_args)
         encode_args.append(str(encoded_path))
         encode_args = [(self._resample_filter if arg == "__RESAMPLE_FILTER__" else arg) for arg in encode_args]
         self._run_with_resample_fallback(encode_args)
 
         # Decode through the same explicit resample path used for encode.
-        decode_args = [
-            self.ffmpeg_bin,
-            "-y",
-            "-i",
-            str(encoded_path),
-            "-vn",
-            "-c:a",
-            "pcm_s16le",
-            "-af",
-            "__RESAMPLE_FILTER__",
-            "-ar",
-            str(target_sr),
-            str(decoded_path),
-        ]
+        decode_args = [self.ffmpeg_bin, "-y"]
+        if runtime_profile.ffmpeg_decode_input_format:
+            decode_args.extend(["-f", runtime_profile.ffmpeg_decode_input_format])
+        decode_args.extend(
+            [
+                "-i",
+                str(encoded_path),
+                "-vn",
+                "-c:a",
+                "pcm_s16le",
+                "-af",
+                "__RESAMPLE_FILTER__",
+                "-ar",
+                str(target_sr),
+                str(decoded_path),
+            ]
+        )
         decode_args = [(self._resample_filter if arg == "__RESAMPLE_FILTER__" else arg) for arg in decode_args]
         self._run_with_resample_fallback(decode_args)
-        return str(encoded_path), str(decoded_path)
+        return str(encoded_path), str(decoded_path), runtime_profile
 
     def _run_stage(
         self,
@@ -363,7 +442,7 @@ class AudioPipeline:
                 decoded_path=wav_in,
             )
 
-        encoded_path, decoded_path = self._encode_decode(
+        encoded_path, decoded_path, runtime_profile = self._encode_decode(
             wav_in=wav_in,
             work_dir=work_dir,
             profile=profile,
@@ -381,8 +460,8 @@ class AudioPipeline:
 
         return PipelineStageResult(
             stage_index=stage_index,
-            codec_id=profile.codec_id,
-            codec_name=profile.ui_name,
+            codec_id=runtime_profile.codec_id,
+            codec_name=runtime_profile.ui_name,
             bitrate_kbps=stage_cfg.bitrate_kbps,
             sample_rate_in=in_sr,
             sample_rate_out=out_sr,
@@ -565,8 +644,12 @@ class AudioPipeline:
 
             enc_a = stage_results_a[-1].encoded_path
             enc_b = stage_results_b[-1].encoded_path
-            profile_a = self.catalog[pipeline_stages_a[-1].codec_id]
-            profile_b = self.catalog[pipeline_stages_b[-1].codec_id]
+            requested_codec_a_id = pipeline_stages_a[-1].codec_id
+            requested_codec_b_id = pipeline_stages_b[-1].codec_id
+            requested_profile_a = self.catalog[requested_codec_a_id]
+            requested_profile_b = self.catalog[requested_codec_b_id]
+            profile_a = self.catalog[stage_results_a[-1].codec_id]
+            profile_b = self.catalog[stage_results_b[-1].codec_id]
             effective_bitrate_a = int(pipeline_stages_a[-1].bitrate_kbps)
             effective_bitrate_b = int(pipeline_stages_b[-1].bitrate_kbps)
             stage_count_a = len(stage_results_a)
@@ -577,20 +660,24 @@ class AudioPipeline:
                 else ProcessingMode.CASCADED_PIPELINE
             )
         else:
+            requested_codec_a_id = codec_a_id
+            requested_codec_b_id = codec_b_id
+            requested_profile_a = self.catalog[requested_codec_a_id]
+            requested_profile_b = self.catalog[requested_codec_b_id]
             profile_a = self.catalog[codec_a_id]
             profile_b = self.catalog[codec_b_id]
 
-            enc_a, dec_a = self._encode_decode(
+            enc_a, dec_a, profile_a_runtime = self._encode_decode(
                 str(working_wav), wd, profile_a, bitrate_a_kbps, target_sr, "track_a"
             )
-            enc_b, dec_b = self._encode_decode(
+            enc_b, dec_b, profile_b_runtime = self._encode_decode(
                 str(working_wav), wd, profile_b, bitrate_b_kbps, target_sr, "track_b"
             )
             stage_results_a = [
                 PipelineStageResult(
                     stage_index=1,
-                    codec_id=profile_a.codec_id,
-                    codec_name=profile_a.ui_name,
+                    codec_id=profile_a_runtime.codec_id,
+                    codec_name=profile_a_runtime.ui_name,
                     bitrate_kbps=bitrate_a_kbps,
                     sample_rate_in=target_sr,
                     sample_rate_out=target_sr,
@@ -601,8 +688,8 @@ class AudioPipeline:
             stage_results_b = [
                 PipelineStageResult(
                     stage_index=1,
-                    codec_id=profile_b.codec_id,
-                    codec_name=profile_b.ui_name,
+                    codec_id=profile_b_runtime.codec_id,
+                    codec_name=profile_b_runtime.ui_name,
                     bitrate_kbps=bitrate_b_kbps,
                     sample_rate_in=target_sr,
                     sample_rate_out=target_sr,
@@ -610,6 +697,8 @@ class AudioPipeline:
                     decoded_path=dec_b,
                 )
             ]
+            profile_a = profile_a_runtime
+            profile_b = profile_b_runtime
             effective_bitrate_a = bitrate_a_kbps
             effective_bitrate_b = bitrate_b_kbps
             stage_count_a = 1
@@ -705,6 +794,10 @@ class AudioPipeline:
             channels=int(arr_a.shape[1]),
             pipeline_stage_count_a=stage_count_a,
             pipeline_stage_count_b=stage_count_b,
+            requested_codec_a_id=requested_codec_a_id,
+            requested_codec_a_name=requested_profile_a.ui_name,
+            requested_codec_b_id=requested_codec_b_id,
+            requested_codec_b_name=requested_profile_b.ui_name,
             bandwidth_limit_a_enabled=bandwidth_limit_a_enabled,
             bandwidth_limit_a_hz=bandwidth_limit_a_hz,
             bandwidth_limit_b_enabled=bandwidth_limit_b_enabled,

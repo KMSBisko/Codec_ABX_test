@@ -152,6 +152,10 @@ TRANSLATIONS = {
         "diag_bandwidth_cutoff_b": "Bandwidth cutoff B",
         "diag_pipeline_a_stages": "Pipeline A stages",
         "diag_pipeline_b_stages": "Pipeline B stages",
+        "diag_encode_engine": "Encode",
+        "diag_decode_engine": "Decode",
+        "diag_requested": "Requested",
+        "diag_effective": "Effective",
         "diag_no_trials": "(no trial answers submitted yet)",
         "diag_mapping_audit": "--- Mapping Audit ---",
         "diag_current_mapping": "Current Mapping",
@@ -272,6 +276,10 @@ TRANSLATIONS = {
         "diag_bandwidth_cutoff_b": "Điểm cắt B",
         "diag_pipeline_a_stages": "Các tầng pipeline A",
         "diag_pipeline_b_stages": "Các tầng pipeline B",
+        "diag_encode_engine": "Mã hóa",
+        "diag_decode_engine": "Giải mã",
+        "diag_requested": "Yêu cầu",
+        "diag_effective": "Thực tế",
         "diag_no_trials": "(chưa có lượt trả lời nào)",
         "diag_mapping_audit": "--- Kiểm tra ánh xạ ---",
         "diag_current_mapping": "Ánh xạ hiện tại",
@@ -369,7 +377,8 @@ class MainWindow(QMainWindow):
         self.logger = ExperimentLogger()
 
         self.catalog = codec_catalog()
-        self.codec_ids = list(self.catalog.keys())
+        self._hidden_select_codec_ids = {"sim_aptx", "sim_aptx_hd", "sim_ldac"}
+        self.codec_ids = [cid for cid in self.catalog.keys() if cid not in self._hidden_select_codec_ids]
         self.pipeline_codec_ids = [cid for cid in self.codec_ids if cid != "lossless_unprocessed"]
 
         self.pipeline_codec_a: list[QComboBox] = []
@@ -2038,6 +2047,8 @@ class MainWindow(QMainWindow):
 
         stats = self.engine.stats()
         mapping_mode = "fixed" if self._mapping_mode_pending == "fixed" else "blind_random"
+        track_a_encode, track_a_decode = self._codec_engine_labels(self.prepared_session.track_a.codec_id)
+        track_b_encode, track_b_decode = self._codec_engine_labels(self.prepared_session.track_b.codec_id)
 
         lines = [
             self._t("diag_session_summary"),
@@ -2052,8 +2063,14 @@ class MainWindow(QMainWindow):
             f"{self._t('diag_bandwidth_cutoff_b')}: {self.prepared_session.bandwidth_limit_b_hz}",
             f"{self._t('diag_target_sr')}: {self.prepared_session.target_sample_rate} Hz",
             f"{self._t('diag_resample_engine')}: {self.prepared_session.resample_engine_used}",
-            f"{self._t('codec_a')}: {self.prepared_session.track_a.codec_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps",
-            f"{self._t('codec_b')}: {self.prepared_session.track_b.codec_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps",
+            f"{self._t('codec_a')} ({self._t('diag_requested')}): "
+            f"{self.prepared_session.requested_codec_a_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps",
+            f"{self._t('codec_a')} ({self._t('diag_effective')}): {self.prepared_session.track_a.codec_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps"
+            + f" | {self._t('diag_encode_engine')}={track_a_encode} | {self._t('diag_decode_engine')}={track_a_decode}",
+            f"{self._t('codec_b')} ({self._t('diag_requested')}): "
+            f"{self.prepared_session.requested_codec_b_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps",
+            f"{self._t('codec_b')} ({self._t('diag_effective')}): {self.prepared_session.track_b.codec_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps"
+            + f" | {self._t('diag_encode_engine')}={track_b_encode} | {self._t('diag_decode_engine')}={track_b_decode}",
             f"{self._t('mapping_mode')}: {mapping_mode}",
             f"{self._t('diag_trials')}: {stats.total_trials}",
             f"{self._t('diag_correct')}: {stats.correct_trials}",
@@ -2063,16 +2080,20 @@ class MainWindow(QMainWindow):
         ]
 
         for stage in self.prepared_session.track_a.stages:
+            stage_encode, stage_decode = self._codec_engine_labels(stage.codec_id)
             lines.append(
                 f"A{stage.stage_index}: {stage.codec_name} @ {stage.bitrate_kbps} kbps "
                 f"(sr {stage.sample_rate_in}->{stage.sample_rate_out})"
+                + f" | {self._t('diag_encode_engine')}={stage_encode} | {self._t('diag_decode_engine')}={stage_decode}"
             )
 
         lines.append(f"{self._t('diag_pipeline_b_stages')}:")
         for stage in self.prepared_session.track_b.stages:
+            stage_encode, stage_decode = self._codec_engine_labels(stage.codec_id)
             lines.append(
                 f"B{stage.stage_index}: {stage.codec_name} @ {stage.bitrate_kbps} kbps "
                 f"(sr {stage.sample_rate_in}->{stage.sample_rate_out})"
+                + f" | {self._t('diag_encode_engine')}={stage_encode} | {self._t('diag_decode_engine')}={stage_decode}"
             )
 
         lines.extend([
@@ -2123,6 +2144,18 @@ class MainWindow(QMainWindow):
                 )
 
         self.diagnostics_view.setPlainText("\n".join(lines))
+
+    def _codec_engine_labels(self, codec_id: str) -> tuple[str, str]:
+        profile = self.catalog.get(codec_id)
+        if profile is None:
+            return "unknown", "auto"
+
+        if profile.passthrough_unprocessed or profile.pipeline_noop:
+            return "none (passthrough)", "none (passthrough)"
+
+        encode_engine = profile.ffmpeg_encoder
+        decode_engine = profile.ffmpeg_decode_input_format or "auto"
+        return encode_engine, decode_engine
 
     def _update_score_ui(self) -> None:
         s = self.engine.stats()

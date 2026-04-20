@@ -2063,14 +2063,6 @@ class MainWindow(QMainWindow):
             f"{self._t('diag_bandwidth_cutoff_b')}: {self.prepared_session.bandwidth_limit_b_hz}",
             f"{self._t('diag_target_sr')}: {self.prepared_session.target_sample_rate} Hz",
             f"{self._t('diag_resample_engine')}: {self.prepared_session.resample_engine_used}",
-            f"{self._t('codec_a')} ({self._t('diag_requested')}): "
-            f"{self.prepared_session.requested_codec_a_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps",
-            f"{self._t('codec_a')} ({self._t('diag_effective')}): {self.prepared_session.track_a.codec_name} @ {self.prepared_session.track_a.bitrate_kbps} kbps"
-            + f" | {self._t('diag_encode_engine')}={track_a_encode} | {self._t('diag_decode_engine')}={track_a_decode}",
-            f"{self._t('codec_b')} ({self._t('diag_requested')}): "
-            f"{self.prepared_session.requested_codec_b_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps",
-            f"{self._t('codec_b')} ({self._t('diag_effective')}): {self.prepared_session.track_b.codec_name} @ {self.prepared_session.track_b.bitrate_kbps} kbps"
-            + f" | {self._t('diag_encode_engine')}={track_b_encode} | {self._t('diag_decode_engine')}={track_b_decode}",
             f"{self._t('mapping_mode')}: {mapping_mode}",
             f"{self._t('diag_trials')}: {stats.total_trials}",
             f"{self._t('diag_correct')}: {stats.correct_trials}",
@@ -2084,7 +2076,9 @@ class MainWindow(QMainWindow):
             lines.append(
                 f"A{stage.stage_index}: {stage.codec_name} @ {stage.bitrate_kbps} kbps "
                 f"(sr {stage.sample_rate_in}->{stage.sample_rate_out})"
-                + f" | {self._t('diag_encode_engine')}={stage_encode} | {self._t('diag_decode_engine')}={stage_decode}"
+            )
+            lines.append(
+                f"  {self._t('diag_encode_engine')}={stage_encode} | {self._t('diag_decode_engine')}={stage_decode}"
             )
 
         lines.append(f"{self._t('diag_pipeline_b_stages')}:")
@@ -2093,7 +2087,9 @@ class MainWindow(QMainWindow):
             lines.append(
                 f"B{stage.stage_index}: {stage.codec_name} @ {stage.bitrate_kbps} kbps "
                 f"(sr {stage.sample_rate_in}->{stage.sample_rate_out})"
-                + f" | {self._t('diag_encode_engine')}={stage_encode} | {self._t('diag_decode_engine')}={stage_decode}"
+            )
+            lines.append(
+                f"  {self._t('diag_encode_engine')}={stage_encode} | {self._t('diag_decode_engine')}={stage_decode}"
             )
 
         lines.extend([

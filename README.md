@@ -61,6 +61,7 @@ Fallback behavior:
 Additional bitrate notes:
 - Lower bitrate options are available for direct codecs (Opus/AAC/Ogg Vorbis/SBC) to stress-test artifact audibility.
 - Real aptX/aptX HD are configured to their typical constant-bitrate profiles (352/576 kbps).
+- For stability across ffmpeg builds, aptX/aptX HD are processed internally at 48 kHz, then resampled to the selected target sample-rate.
 - Real LDAC is available at 330/660/990 kbps when `libldac` is present.
 - Internal fallback simulation uses AAC bitrate-matched profiles for aptX/aptX HD/LDAC when needed.
 
@@ -245,6 +246,7 @@ Hành vi fallback:
 Ghi chú bitrate bổ sung:
 - Có thêm các mức bitrate thấp cho codec trực tiếp (Opus/AAC/Ogg Vorbis/SBC) để stress-test khả năng nghe ra artefact.
 - aptX/aptX HD thật được cấu hình theo profile CBR điển hình (352/576 kbps).
+- Để ổn định trên nhiều bản ffmpeg, aptX/aptX HD được xử lý nội bộ ở 48 kHz rồi resample về sample-rate mục tiêu đã chọn.
 - LDAC thật có các mức 330/660/990 kbps khi có `libldac`.
 - Fallback mô phỏng nội bộ dùng profile AAC khớp bitrate cho aptX/aptX HD/LDAC khi cần.
 

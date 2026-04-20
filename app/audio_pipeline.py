@@ -316,10 +316,9 @@ class AudioPipeline:
                 return target_sr
             return 48000
 
-        # aptX and aptX HD are typically used at 44.1/48 kHz.
+        # aptX/aptX HD in some ffmpeg builds can produce pitch/timing drift at 44.1 kHz.
+        # Keep internal codec processing fixed at 48 kHz, then resample decode output to target_sr.
         if profile.ffmpeg_encoder in ("aptx", "aptx_hd"):
-            if target_sr in (44100, 48000):
-                return target_sr
             return 48000
 
         # Keep LDAC bitrates aligned to the common 48 kHz profile set.

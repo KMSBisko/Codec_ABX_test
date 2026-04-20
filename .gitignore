@@ -33,3 +33,5 @@ Thumbs.db
 run_abx.spec
 
 run_abx.exe
+third_party/ffmpeg/bin/ffmpeg.exe
+third_party/ffmpeg/bin/ffprobe.exe

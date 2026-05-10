@@ -363,6 +363,10 @@ class AudioPipeline:
             self._run_with_resample_fallback(passthrough_args)
             return str(encoded_path), str(encoded_path), runtime_profile
 
+        if runtime_profile.pipeline_noop:
+            # Return input as-is without any processing or resampling
+            return str(wav_in), str(wav_in), runtime_profile
+
         self._require_encoder(runtime_profile)
 
         encode_sr = self._select_encoder_sample_rate(runtime_profile, target_sr)
@@ -426,6 +430,7 @@ class AudioPipeline:
             raise PipelineError(f"Invalid bitrate in stage {stage_index}")
 
         if profile.pipeline_noop:
+            # Return input as-is without any processing or resampling
             input_sr = self._probe(wav_in).get("sample_rate", 0)
             in_sr = int(input_sr or 0)
             if in_sr <= 0:

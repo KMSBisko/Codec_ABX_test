@@ -119,14 +119,6 @@ class TrialResult:
 
 def codec_catalog() -> Dict[str, CodecProfile]:
     return {
-        "lossless_unprocessed": CodecProfile(
-            codec_id="lossless_unprocessed",
-            display_name="Lossless (Unprocessed Reference)",
-            ffmpeg_encoder="pcm_s16le",
-            container_ext="wav",
-            bitrate_options_kbps=[0],
-            passthrough_unprocessed=True,
-        ),
         "noop_passthrough": CodecProfile(
             codec_id="noop_passthrough",
             display_name="No-op / Lossless passthrough",

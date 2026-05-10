@@ -35,3 +35,32 @@ run_abx.spec
 run_abx.exe
 third_party/ffmpeg/bin/ffmpeg.exe
 third_party/ffmpeg/bin/ffprobe.exe
+
+# Cline AI rules & memory bank (auto-generated documentation)
+.clinerules/
+memory-bank/
+
+# Internal transition docs not meant for end users
+START_HERE.md
+IMPLEMENTATION_SUMMARY.md
+PROJECT_MAP.md
+
+# Web server specific
+web/uploads/*
+web/sessions/*
+!web/uploads/.gitkeep
+!web/sessions/.gitkeep
+*.log
+.env
+.env.local
+.env.*.local
+
+# Temporary audio files
+temp_*.wav
+temp_*.flac
+/tmp/
+/temp/
+
+# Docker
+docker-compose.override.yml
+DESIGN.md

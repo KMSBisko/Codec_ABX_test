@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Codec ABX Tester</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="theme-light">
+    <!-- ── Toolbar ──────────────────────────────────────────────────────── -->
+    <header id="toolbar" class="toolbar">
+        <div class="toolbar-left">
+            <h1 class="app-title">Codec ABX Tester</h1>
+        </div>
+        <div class="toolbar-right">
+            <!-- Language Switcher -->
+            <select id="langSelect" class="toolbar-btn" title="Language / Ngôn ngữ">
+                <option value="en">EN</option>
+                <option value="vi">VI</option>
+            </select>
+
+            <!-- Theme Toggle -->
+            <button id="themeToggle" class="toolbar-btn icon-btn" title="Toggle Dark Mode">🌙</button>
+
+            <!-- Zoom Controls -->
+            <div class="zoom-controls">
+                <button id="zoomOut" class="toolbar-btn icon-btn" title="Zoom Out">−</button>
+                <span id="zoomLevel" class="zoom-label">100%</span>
+                <button id="zoomIn" class="toolbar-btn icon-btn" title="Zoom In">+</button>
+            </div>
+        </div>
+    </header>
+
+    <!-- ── Main Content ─────────────────────────────────────────────────── -->
+    <main id="mainContent">
+        <!-- Section 1: Input & Configuration -->
+        <section id="inputSection" class="panel">
+            <h2 data-i18n="input_title">Input & Configuration</h2>
+
+            <div class="form-group">
+                <label for="fileUpload" data-i18n="audio_file_label">Audio File (WAV / FLAC)</label>
+                <div class="file-upload-area" id="fileDropZone">
+                    <input type="file" id="fileUpload" accept=".wav,.flac">
+                    <span class="file-name" id="fileNameDisplay" data-i18n="drop_file_placeholder">Drop file or click to browse</span>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="sampleRateMode" data-i18n="sample_rate_mode_label">Sample Rate Mode</label>
+                    <select id="sampleRateMode">
+                        <option value="native" data-i18n-opt="["Native (keep original)", "Gốc (giữ nguyên)"]">Native (keep original)</option>
+                        <option value="force_48k" data-i18n-opt="["Force 48 kHz", &quot>Buộc 48 kHz"]">Force 48 kHz</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="labelMappingMode" data-i18n="label_mapping_label">Label Mapping Mode</label>
+                    <select id="labelMappingMode">
+                        <option value="fixed" data-i18n-opt="["Fixed (A→A, B→B)", "Cố định (A→A, B→B)"]">Fixed (A→A, B→B)</option>
+                        <option value="blind_random" data-i18n-opt="["Blind Random", &quot>Mù ngẫu nhiên"]">Blind Random</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Codec Configuration -->
+            <h3 data-i18n="codec_config_title">Codec Configuration</h3>
+
+            <div class="form-row">
+                <!-- Side A Pipeline -->
+                <div class="pipeline-config" id="pipelineA">
+                    <label data-i18n="side_a_label">Side A Pipeline</label>
+                    <div class="stages-container" id="stagesA"></div>
+                    <button class="btn btn-sm" onclick="addStage('A')" data-i18n="add_stage_btn">+ Add Stage</button>
+
+                    <div class="bandwidth-limit">
+                        <label>
+                            <input type="checkbox" id="bwLimitEnabledA" onchange="toggleBwLimit('A')">
+                            <span data-i18n="bw_limit_label">Bandwidth Limit (Low-Pass)</span>
+                        </label>
+                        <div id="bwLimitControlsA" class="bw-controls hidden">
+                            <input type="number" id="bwLimitHzA" min="100" max="48000" step="50" value="22050" placeholder="Hz">
+                            <span data-i18n="hz_label">Hz</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Side B Pipeline -->
+                <div class="pipeline-config" id="pipelineB">
+                    <label data-i18n="side_b_label">Side B Pipeline</label>
+                    <div class="stages-container" id="stagesB"></div>
+                    <button class="btn btn-sm" onclick="addStage('B')" data-i18n="add_stage_btn">+ Add Stage</button>
+
+                    <div class="bandwidth-limit">
+                        <label>
+                            <input type="checkbox" id="bwLimitEnabledB" onchange="toggleBwLimit('B')">
+                            <span data-i18n="bw_limit_label">Bandwidth Limit (Low-Pass)</span>
+                        </label>
+                        <div id="bwLimitControlsB" class="bw-controls hidden">
+                            <input type="number" id="bwLimitHzB" min="100" max="48000" step="50" value="22050" placeholder="Hz">
+                            <span data-i18n="hz_label">Hz</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Preprocess Button & Progress -->
+            <div class="preprocess-area">
+                <button id="btnPreprocess" class="btn btn-primary" onclick="startPreprocess()" data-i18n="preprocess_btn">▶ Preprocess & Validate</button>
+                <button id="btnCancelPreprocess" class="btn btn-warning hidden" onclick="cancelPreprocess()" data-i18n="cancel_btn">✕ Cancel</button>
+
+                <div id="progressArea" class="progress-area hidden">
+                    <div class="progress-bar-container">
+                        <div id="progressBar" class="progress-bar" style="width: 0%"></div>
+                    </div>
+                    <span id="progressMessage" class="progress-message"></span>
+                </div>
+
+                <div id="validationResult" class="validation-result hidden">
+                    <h4 data-i18n="validation_title">Validation Results</h4>
+                    <ul id="validationNotes"></ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 2: ABX Playback Controls -->
+        <section id="abxSection" class="panel hidden">
+            <h2 data-i18n="abx_title">ABX Playback</h2>
+
+            <div class="trial-info">
+                <span id="trialCounter" data-i18n-template="trial_counter">Trial: 0 / 0</span>
+                <span id="scoreDisplay" data-i18n-template="score_display">Score: 0 correct</span>
+            </div>
+
+            <!-- Audio Buttons -->
+            <div class="audio-buttons">
+                <button id="btnPlayPause" class="btn btn-audio btn-play-pause" onclick="togglePlayPause()" title="Play/Pause (Space)">▶/⏸</button>
+                <button id="btnPlayA" class="btn btn-audio btn-side-a" onclick="playAudio('a')" data-i18n="play_a_btn">▶ Play A</button>
+                <button id="btnPlayX" class="btn btn-audio btn-side-x" onclick="playAudio('x')" data-i18n="play_x_btn">▶ Play X</button>
+                <button id="btnPlayB" class="btn btn-audio btn-side-b" onclick="playAudio('b')" data-i18n="play_b_btn">▶ Play B</button>
+            </div>
+
+            <!-- Timeline / Scrubber -->
+            <div class="timeline-container">
+                <input type="range" id="scrubSlider" min="0" max="1000" value="0" class="scrub-slider">
+                <span id="timeDisplay" class="time-display">0:00 / 0:00</span>
+            </div>
+
+            <!-- Loop Controls -->
+            <div class="loop-controls">
+                <label data-i18n="loop_label">Loop:</label>
+                <input type="checkbox" id="loopEnabled">
+                <input type="number" id="loopStart" min="0" step="0.01" value="0" placeholder="Start (s)">
+                <input type="number" id="loopEnd" min="0" step="0.01" value="0" placeholder="End (s)">
+            </div>
+
+            <!-- Answer Buttons -->
+            <div class="answer-buttons">
+                <button id="btnAnswerA" class="btn btn-answer" onclick="submitAnswer('A')" data-i18n="answer_a_btn">X is A</button>
+                <button id="btnAnswerB" class="btn btn-answer" onclick="submitAnswer('B')" data-i18n="answer_b_btn">X is B</button>
+            </div>
+
+            <!-- Feedback -->
+            <div id="trialFeedback" class="trial-feedback hidden">
+                <span id="feedbackText"></span>
+            </div>
+
+            <!-- Trial Controls -->
+            <div class="trial-controls">
+                <button id="btnResetTrials" class="btn" onclick="resetTrials()" data-i18n="reset_trials_btn">↺ Reset Trials</button>
+            </div>
+
+            <!-- Statistics -->
+            <div id="statsArea" class="stats-area">
+                <h4 data-i18n="statistics_title">Statistics</h4>
+                <table id="statsTable">
+                    <tr><td data-i18n="total_trials_label">Total Trials:</td><td id="statTotal">0</td></tr>
+                    <tr><td data-i18n="correct_label">Correct:</td><td id="statCorrect">0</td></tr>
+                    <tr><td data-i18n="p_value_label">One-tailed p-value:</td><td id="statPValue">1.0000</td></tr>
+                </table>
+            </div>
+
+            <!-- Export -->
+            <div class="export-area">
+                <button class="btn" onclick="exportJSON()" data-i18n="export_json_btn">Export JSON</button>
+                <button class="btn" onclick="exportCSV()" data-i18n="export_csv_btn">Export CSV</button>
+            </div>
+        </section>
+
+        <!-- Section 3: Diagnostics -->
+        <section id="diagnosticsSection" class="panel hidden">
+            <h2 data-i18n="diagnostics_title">Diagnostics</h2>
+            <pre id="diagnosticsOutput" class="diagnostics-output"></pre>
+            <button class="btn btn-sm" onclick="loadDiagnostics()" data-i18n="refresh_diag_btn">↺ Refresh</button>
+        </section>
+    </main>
+
+    <!-- ── Footer ───────────────────────────────────────────────────────── -->
+    <footer id="footer">
+        <span>Codec ABX Tester — Web Edition</span>
+    </footer>
+
+    <!-- ── JavaScript ───────────────────────────────────────────────────── -->
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

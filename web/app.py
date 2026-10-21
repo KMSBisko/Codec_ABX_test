@@ -46,6 +46,15 @@ from .models import (
     trial_result_to_dict,
 )
 
+import sys as _sys
+from core.abx import (
+    LABEL_MODE_BLIND,
+    LABEL_MODE_FIXED,
+    ABXEngine as CoreABXEngine,
+)
+from core.alignment import align_pair, estimate_lag, null_depth_db
+from core.stats import holm_bonferroni, min_correct_for_significance
+
 # ── Flask App Setup ──────────────────────────────────────────────────────────
 
 app = Flask(
@@ -79,6 +88,7 @@ class SessionState:
         self.bandwidth_limit_a_hz: Optional[int] = None
         self.bandwidth_limit_b_enabled: bool = False
         self.bandwidth_limit_b_hz: Optional[int] = None
+        # Pre-registered trial count (fixed BEFORE the first answer)
         # Preprocessing
         self.preprocess_running = False
         self.preprocess_cancelled = False
@@ -92,114 +102,101 @@ class SessionState:
         self.audio_b_path: Optional[str] = None
         # Session metadata for diagnostics
         self.session_metadata: Dict[str, Any] = {}
-        # ABX Engine state
-        self.trials: List[TrialResult] = []
-        self.total_trials = 0
-        self.correct_trials = 0
-        self.current_x_is: str = "A"
-        # Label mapping for blind mode
-        self.mapping_a_to: str = "source_A"
-        self.mapping_b_to: str = "source_B"
-        self._blind_no_change_streak = 0
+        # ABX Engine state (canonical engine from core.abx -- shared with the
+        # desktop app so identical studies yield identical statistics)
+        self.planned_trials: Optional[int] = None
+        self.engine = CoreABXEngine(
+            planned_trials=None,
+            label_mode=LABEL_MODE_FIXED,
+        )
+        # token -> TrialPlan for the trial in flight. X audio is served by
+        # token so the client can play X without ever learning whether X is
+        # A or B. The pre-Phase-0 /api/trial/start shipped `x_is` and the
+        # label mapping to the browser, so the answer sat in the client
+        # before the answer was made.
+        self.pending_plans: Dict[str, Any] = {}
+
+    def configure_engine(self) -> None:
+        """(Re)build the engine from the current session configuration."""
+        self.engine = CoreABXEngine(
+            planned_trials=self.planned_trials,
+            label_mode=(
+                LABEL_MODE_BLIND
+                if self.label_mapping_mode == LabelMappingMode.BLIND_RANDOM
+                else LABEL_MODE_FIXED
+            ),
+        )
+        self.pending_plans.clear()
 
     def reset_trials(self):
         """Reset ABX trial state."""
-        self.trials.clear()
-        self.total_trials = 0
-        self.correct_trials = 0
-        self.current_x_is = self._random_x()
-        self.mapping_a_to = "source_A"
-        self.mapping_b_to = "source_B"
-        self._blind_no_change_streak = 0
-
-    def _random_x(self) -> str:
-        return "A" if random.random() < 0.5 else "B"
+        self.engine.reset()
+        self.configure_engine()
 
     def new_trial(self) -> Dict[str, Any]:
-        """Start a new trial. Returns trial info with label mapping."""
-        self.current_x_is = self._random_x()
+        """Start a new trial. Returns the CLIENT-SAFE plan only."""
+        plan = self.engine.new_trial()
+        self.pending_plans[plan.token] = plan
+        # Keep the token table small; only the newest plans are playable.
+        if len(self.pending_plans) > 8:
+            for key in list(self.pending_plans.keys())[:-8]:
+                self.pending_plans.pop(key, None)
+        return plan.public()
 
-        # Handle blind random mode: possibly swap labels
-        if self.label_mapping_mode == LabelMappingMode.BLIND_RANDOM:
-            changed = False
-            # Increase swap probability with streak length
-            swap_prob = min(0.1 * self._blind_no_change_streak, 0.5)
-            if random.random() < swap_prob:
-                self.mapping_a_to, self.mapping_b_to = (
-                    self.mapping_b_to,
-                    self.mapping_a_to,
-                )
-                changed = True
-                self._blind_no_change_streak = 0
-            else:
-                self._blind_no_change_streak += 1
-
-        return {
-            "trial_index": self.total_trials + 1,
-            "x_is": self.current_x_is,
-            "mapping_a_to": self.mapping_a_to,
-            "mapping_b_to": self.mapping_b_to,
-        }
-
-    def submit_answer(self, answer: str) -> TrialResult:
-        """Submit user's answer for current trial."""
-        normalized = answer.strip().upper()
-        if normalized not in ("A", "B"):
-            raise ValueError("answer must be 'A' or 'B'")
-
-        self.total_trials += 1
-        # Resolve what the user actually selected (source level)
-        display_x_source = (
-            self.mapping_a_to if self.current_x_is == "A" else self.mapping_b_to
+    def resolve_x_path(self, token: Optional[str] = None) -> Optional[str]:
+        """Server-side resolution of X -> the actual audio file."""
+        plan = self.pending_plans.get(token) if token else None
+        if plan is None:
+            # Fall back to the most recently issued plan.
+            plans = list(self.pending_plans.values())
+            plan = plans[-1] if plans else None
+        if plan is None:
+            return None
+        return (
+            self.audio_a_path
+            if plan.x_source == "A"
+            else self.audio_b_path
         )
-        answer_source = (
-            self.mapping_a_to if normalized == "A" else self.mapping_b_to
+
+    def submit_answer(self, answer_display: str) -> TrialResult:
+        """Score an answer given as a DISPLAY label.
+
+        The engine resolves display -> source and compares against X's
+        source. The legacy code compared a display answer against a
+        source-level X and applied the label mapping in the wrong direction,
+        so a perfect listener under swapped labels was scored INCORRECT.
+        Reproduced in tests/test_legacy_blind_bug.py.
+        """
+        trial = self.engine.submit_answer(answer_display)
+        return TrialResult(
+            trial_index=trial.trial_index,
+            x_is=trial.x_source,
+            answer=trial.answer_display,
+            correct=trial.correct,
+            timestamp_utc=trial.timestamp_utc,
+            mapping_a_to=trial.display_mapping.get("A"),
+            mapping_b_to=trial.display_mapping.get("B"),
+            x_source=trial.x_source,
+            answer_source=trial.answer_source,
+            mapping_changed_for_next_trial=None,
         )
-        is_correct = normalized == self.current_x_is
-        if is_correct:
-            self.correct_trials += 1
-
-        trial = TrialResult(
-            trial_index=self.total_trials,
-            x_is=self.current_x_is,
-            answer=normalized,
-            correct=is_correct,
-            timestamp_utc=datetime.now(timezone.utc).isoformat(),
-            mapping_a_to=self.mapping_a_to,
-            mapping_b_to=self.mapping_b_to,
-            x_source=display_x_source,
-            answer_source=answer_source,
-        )
-        self.trials.append(trial)
-
-        # Prepare next trial
-        self.current_x_is = self._random_x()
-        changed_for_next = False
-        if self.label_mapping_mode == LabelMappingMode.BLIND_RANDOM:
-            swap_prob = min(0.1 * self._blind_no_change_streak, 0.5)
-            if random.random() < swap_prob:
-                changed_for_next = True
-
-        trial.mapping_changed_for_next_trial = changed_for_next
-
-        return trial
-
-    def one_tailed_p_value(self) -> float:
-        n = self.total_trials
-        k = self.correct_trials
-        if n == 0:
-            return 1.0
-        total = 0.0
-        for i in range(k, n + 1):
-            total += math.comb(n, i) * (0.5 ** n)
-        return min(max(total, 0.0), 1.0)
 
     def stats(self) -> Dict[str, Any]:
-        return {
-            "total_trials": self.total_trials,
-            "correct_trials": self.correct_trials,
-            "p_value_one_tailed": self.one_tailed_p_value(),
-        }
+        raw = self.engine.stats()
+        raw["session_commitment"] = self.engine.session_commitment
+        return raw
+
+    @property
+    def trials(self) -> List[Any]:
+        return self.engine.trials
+
+    @property
+    def total_trials(self) -> int:
+        return self.engine.total_trials
+
+    @property
+    def correct_trials(self) -> int:
+        return self.engine.correct_trials
 
 
 # Global session state
@@ -300,6 +297,11 @@ def set_config():
         if sr_mode:
             session.sample_rate_mode = SampleRateMode(sr_mode)
 
+        # Pre-registered trial count: fixed BEFORE the first answer.
+        if "planned_trials" in data:
+            pt = data.get("planned_trials")
+            session.planned_trials = int(pt) if pt else None
+
         # Label mapping mode
         lm_mode = data.get("label_mapping_mode")
         if lm_mode:
@@ -318,6 +320,10 @@ def set_config():
             PipelineStageConfig(s["codec_id"], s["bitrate_kbps"])
             for s in stages_b_data
         ]
+
+        # Label mode / planned N changed under us: rebuild the engine so the
+        # pre-registration and blinding reflect the new configuration.
+        session.configure_engine()
 
         # Bandwidth limits
         session.bandwidth_limit_a_enabled = data.get("bandwidth_limit_a_enabled", False)
@@ -583,27 +589,14 @@ def _run_preprocess():
         a_data = load_wav_float(audio_a_final)
         b_data = load_wav_float(audio_b_final)
 
-        # Use shorter segment for cross-correlation to save memory
-        seg_len = min(len(a_data), len(b_data), 48000 * 5)  # max 5 seconds
-        a_seg = a_data[:seg_len]
-        b_seg = b_data[:seg_len]
-
-        if len(a_seg) > 1 and len(b_seg) > 1:
-            # Use full-mode correlation to get lag at all offsets.
-            # Default 'valid' mode returns a single scalar when inputs are equal-length,
-            # which causes incorrect large negative lag values (~5s delay on Side A).
-            corr_full = np.correlate(a_seg - np.mean(a_seg), b_seg - np.mean(b_seg), mode="full")
-            max_lag_idx = np.argmax(corr_full)
-            alignment_lag = int(max_lag_idx - len(a_seg) + 1)
-        else:
-            alignment_lag = 0
-
-        # Apply alignment (pad or trim)
-        if abs(alignment_lag) > 0:
-            if alignment_lag > 0:
-                b_data = np.pad(b_data, ((alignment_lag, 0)), mode="constant")
-            else:
-                a_data = np.pad(a_data, ((abs(alignment_lag), 0)), mode="constant")
+        # Shared with the desktop build via core.alignment. The pre-Phase-0 web
+        # code searched every lag out to +/-5 s (locks onto periodicity/transient
+        # spurious peaks) and PADDED the delayed side with zeros at the head,
+        # which shifts musical content APART -- at the same timeline position
+        # the listener heard different music, silently invalidating the test.
+        alignment_lag, alignment_confidence = estimate_lag(a_data, b_data)
+        a_data, b_data = align_pair(a_data, b_data, alignment_lag)
+        pre_norm_null_db = null_depth_db(a_data, b_data)
 
         # ── Phase 6: Length Trim ────────────────────────────────────────────
         _set_phase("length_trim", 82, "Trimming to equal length...")
@@ -672,6 +665,8 @@ def _run_preprocess():
                 "loudness_b_lufs": round(loudness_b, 2),
                 "loudness_diff_db": round(loudness_diff, 3),
                 "alignment_lag_samples": alignment_lag,
+                "alignment_confidence": round(float(alignment_confidence), 5),
+                "null_depth_db_pre_loudness": round(float(pre_norm_null_db), 3),
                 "validation_notes": validation_notes,
                 "stages_a_details": stages_a_results,
                 "stages_b_details": stages_b_results,
@@ -798,14 +793,22 @@ def probe_duration(path: str) -> float:
 
 @app.route("/api/audio/<side>", methods=["GET"])
 def stream_audio(side: str):
-    """Stream processed audio A or B for playback."""
+    """Stream processed audio A, B, or X for playback.
+
+    'x' is resolved SERVER-SIDE from the trial token. The client asks for
+    "the X audio" and receives bytes; it never learns which side that was.
+    """
     with session.lock:
         if side == "a":
             path = session.audio_a_path
         elif side == "b":
             path = session.audio_b_path
+        elif side == "x":
+            path = session.resolve_x_path(
+                request.args.get("token", type=str)
+            )
         else:
-            return jsonify({"error": "side must be 'a' or 'b'"}), 400
+            return jsonify({"error": "side must be 'a', 'b' or 'x'"}), 400
 
         if not path or not Path(path).exists():
             return jsonify({"error": f"audio {side} not found"}), 404
@@ -830,8 +833,10 @@ def stream_audio_segment(side: str):
             path = session.audio_a_path
         elif side == "b":
             path = session.audio_b_path
+        elif side == "x":
+            path = session.resolve_x_path(request.args.get("token", type=str))
         else:
-            return jsonify({"error": "side must be 'a' or 'b'"}), 400
+            return jsonify({"error": "side must be 'a', 'b' or 'x'"}), 400
 
         if not path or not Path(path).exists():
             return jsonify({"error": f"audio {side} not found"}), 404
@@ -896,6 +901,22 @@ def audio_info():
 
 # ── API: ABX Trials ──────────────────────────────────────────────────────────
 
+def _trial_dict(trial) -> Dict[str, Any]:
+    """core.abx Trial -> the legacy dict shape the UI/export already expects."""
+    return {
+        "trial_index": trial.trial_index,
+        "x_is": trial.x_source,
+        "answer": trial.answer_display,
+        "correct": trial.correct,
+        "timestamp_utc": trial.timestamp_utc,
+        "mapping_a_to": trial.display_mapping.get("A"),
+        "mapping_b_to": trial.display_mapping.get("B"),
+        "x_source": trial.x_source,
+        "answer_source": trial.answer_source,
+        "mapping_changed_for_next_trial": None,
+    }
+
+
 @app.route("/api/trial/start", methods=["POST"])
 def start_trial():
     """Start a new ABX trial."""
@@ -943,7 +964,7 @@ def get_trials():
     """Return all trial results."""
     with session.lock:
         return jsonify({
-            "trials": [trial_result_to_dict(t) for t in session.trials],
+            "trials": [_trial_dict(t) for t in session.trials],
             "stats": session.stats(),
         })
 
@@ -956,10 +977,14 @@ def get_diagnostics():
     with session.lock:
         return jsonify({
             "metadata": session.session_metadata,
-            "trials": [trial_result_to_dict(t) for t in session.trials],
+            "trials": [_trial_dict(t) for t in session.trials],
             "stats": session.stats(),
-            "mapping_a_to": session.mapping_a_to,
-            "mapping_b_to": session.mapping_b_to,
+            "display_mapping": session.engine.pending_mapping,
+            # legacy keys the existing UI reads
+            "mapping_a_to": (
+                session.engine.pending_mapping or {}).get("A"),
+            "mapping_b_to": (
+                session.engine.pending_mapping or {}).get("B"),
         })
 
 
@@ -971,8 +996,14 @@ def export_json():
     with session.lock:
         data = {
             "exported_at_utc": datetime.now(timezone.utc).isoformat(),
-            "session": session.session_metadata,
-            "trials": [trial_result_to_dict(t) for t in session.trials],
+            "session": {
+                **session.session_metadata,
+                "export_schema": "abx-session/1",
+                "tool": "codec-abx-tester/web",
+                "disclosure": session.session_metadata.get("disclosure", {}),
+                "verifiability": session.engine.reveal(),
+            },
+            "trials": [_trial_dict(t) for t in session.trials],
             "stats": session.stats(),
         }
 

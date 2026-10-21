@@ -1,0 +1,6 @@
+# Test/dev tooling. The core suite runs with pytest + numpy + flask only;
+# PyQt6/sounddevice are NOT needed to test the statistics, blinding, alignment
+# or web API contract.
+-r requirements-core.txt
+pytest>=8
+flask>=3

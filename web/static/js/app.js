@@ -32,7 +32,12 @@ const state = {
     // Polling for preprocess status
     pollInterval: null,
     // Track which side X maps to for the current trial
-    xIsA: true,
+    // X is fetched from the server by opaque trial token. The client never
+// receives `x_is`, so it cannot know which side X is -- the pre-Phase-0
+    // backend shipped the answer in /api/trial/start.
+    xToken: null,
+    bufferX: null,
+    statsMeta: {},
     // Auto-advance: keep audio playing after answer and auto-start next trial
     autoAdvanceEnabled: true,
     // Scrub state tracking — prevents animation from fighting user drag
@@ -61,7 +66,12 @@ const translations = {
         validation_title: "Validation Results",
         abx_title: "ABX Playback",
         trial_counter: (t, c) => `Trial: ${t}`,
+        planned_n_label: "Planned N (pre-registered trials)",
         score_display: (c, t) => `Score: ${c}/${t} correct`,
+        planned_n_hint: "Fix the trial count BEFORE the first answer. 0 = not registered: no verdict is shown as final.",
+        no_planned_n_tooltip: "No trial count was fixed before the test, so this p-value is descriptive only and is not a verdict. Set Planned N before the first answer.",
+        verdict_final_tooltip: "N was reached as pre-registered. The binomial p-value is valid for this fixed-N design.",
+        verdict_provisional_tooltip: "Trials are still short of the pre-registered N. Do not stop here because this number looks good: stopping early inflates false positives.",
         play_a_btn: "▶ Play A",
         play_x_btn: "▶ Play X",
         play_b_btn: "▶ Play B",
@@ -93,10 +103,15 @@ const translations = {
         hz_label: "Hz",
         preprocess_btn: "▶ Tiền xử lý & Kiểm tra",
         cancel_btn: "✕ Hủy",
+        planned_n_label: "N dự kiến (số lượt đăng ký trước)",
         validation_title: "Kết quả kiểm tra",
+        planned_n_hint: "Cố định số lượt TRƯỚC khi trả lời. 0 = không đăng ký: không hiển thị kết luận chính thức.",
         abx_title: "Phát ABX",
         trial_counter: (t, c) => `Lần thử: ${t}`,
         score_display: (c, t) => `Điểm: ${c}/${t} đúng`,
+        no_planned_n_tooltip: "Chưa cố định số lượt trước khi test, nên p-value này chỉ mang tính mô tả, không phải kết luận. Hãy đặt N dự kiến trước lượt trả lời đầu tiên.",
+        verdict_final_tooltip: "Đã đạt N như đã đăng ký trước. p-value nhị thức hợp lệ với thiết kế N cố định này.",
+        verdict_provisional_tooltip: "Vẫn chưa đạt N đã đăng ký. Đừng dừng lại vì con số này trông đẹp: dừng sớm sẽ làm tăng báo giả.",
         play_a_btn: "▶ Phát A",
         play_x_btn: "▶ Phát X",
         play_b_btn: "▶ Phát B",
@@ -367,6 +382,13 @@ async function startPreprocess() {
         bandwidth_limit_a_hz: parseInt(document.getElementById("bwLimitHzA").value) || null,
         bandwidth_limit_b_enabled: document.getElementById("bwLimitEnabledB").checked,
         bandwidth_limit_b_hz: parseInt(document.getElementById("bwLimitHzB").value) || null,
+        // Pre-registered trial count (fixed before the first answer)
+        planned_trials: (function () {
+            const el = document.getElementById("plannedTrials");
+            if (!el) return null;
+            const n = parseInt(el.value, 10);
+            return Number.isFinite(n) && n > 0 ? n : null;
+        })(),
     };
 
     try {
@@ -546,12 +568,20 @@ async function loadAudioInfo() {
 /**
  * Fetch and decode a single audio buffer from the server.
  */
-async function preloadBuffer(side) {
-    const resp = await fetch(`/api/audio/${side}`);
+async function preloadBuffer(side, token) {
+    // 'x' resolves server-side from the trial token: the client asks for
+    // "the X audio" and gets bytes, never an A/B identity.
+    const url = side === "x"
+        ? `/api/audio/x?token=${encodeURIComponent(token || "")}`
+        : `/api/audio/${side}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`audio ${side}: HTTP ${resp.status}`);
     const arrayBuf = await resp.arrayBuffer();
     const buffer = await state.audioContext.decodeAudioData(arrayBuf.slice(0));
     if (side === "a") state.bufferA = buffer;
-    else state.bufferB = buffer;
+    else if (side === "b") state.bufferB = buffer;
+    else state.bufferX = buffer;
+    return buffer;
 }
 
 /**
@@ -566,8 +596,8 @@ function getBufferForSide(side) {
     }
     if (side === "a") return state.bufferA;
     if (side === "b") return state.bufferB;
-    // x: use the buffer matching the current trial's X assignment
-    return state.xIsA ? state.bufferA : state.bufferB;
+    // x: the server-resolved X buffer for the current trial token
+    return state.bufferX || state.bufferA;
 }
 
 /**
@@ -1026,8 +1056,14 @@ async function startNewTrial() {
         state.totalTrials = stats.total_trials;
         state.correctTrials = stats.correct_trials;
 
-        // Track which side X maps to (A or B) for correct audio playback
-        state.xIsA = trialInfo.x_is === "A";
+        // The plan carries a token, not an answer. Refetch X audio so the
+        // play button emits this trial's X.
+        state.xToken = trialInfo.token || null;
+        try {
+            await preloadBuffer("x", state.xToken);
+        } catch (e) {
+            console.error("X buffer preload failed:", e);
+        }
 
         updateStatsDisplay();
 
@@ -1128,7 +1164,20 @@ function updateStatsDisplay() {
 
     // Fetch p-value from server
     api("/api/trial/stats").then(s => {
-        document.getElementById("statPValue").textContent = s.p_value_one_tailed.toFixed(4);
+        state.statsMeta = s;
+        const el = document.getElementById("statPValue");
+        const p = s.p_value_one_tailed.toFixed(5);
+        if (!s.planned_trials) {
+            // No pre-registered N: the p-value is descriptive only.
+            el.textContent = `${p} (no N set)`;
+            el.title = t("no_planned_n_tooltip");
+        } else if (s.is_final) {
+            el.textContent = `${p} (final, >=${s.required_correct}/${s.planned_trials})`;
+            el.title = t("verdict_final_tooltip");
+        } else {
+            el.textContent = `${p} (provisional, >=${s.required_correct}/${s.planned_trials})`;
+            el.title = t("verdict_provisional_tooltip");
+        }
     });
 
     document.getElementById("trialCounter").textContent = t("trial_counter", stats.totalTrials + 1, stats.correctTrials);

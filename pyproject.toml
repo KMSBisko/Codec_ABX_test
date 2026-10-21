@@ -1,0 +1,17 @@
+[project]
+name = "codec-abx-tester"
+version = "0.1.0"
+description = "Statistically gated ABX codec listening tests (desktop + web)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "pipeline: requires ffmpeg (real codec encode/decode)",
+]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

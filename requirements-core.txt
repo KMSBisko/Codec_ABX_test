@@ -1,0 +1,4 @@
+# core/ runtime: stdlib + numpy only. Deliberately minimal -- this is the
+# citation surface of the tool (statistics, alignment, trial engine) and must
+# stay importable without Qt, Flask, or an audio backend.
+numpy>=1.26,<3

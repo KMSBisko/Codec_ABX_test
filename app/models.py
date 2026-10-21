@@ -75,6 +75,10 @@ class SessionValidation:
     alignment_lag_samples: int
     has_switch_guard: bool
     notes: List[str]
+    alignment_confidence: float = 0.0
+    # Residual level after subtracting B from A: hard proof of level/phase
+    # matching, not a claim. inf = perfect null, NaN = not measured.
+    null_depth_db: float = float("nan")
 
 
 @dataclass
@@ -101,6 +105,9 @@ class PreparedSession:
     bandwidth_limit_a_hz: Optional[int] = None
     bandwidth_limit_b_enabled: bool = False
     bandwidth_limit_b_hz: Optional[int] = None
+    # What the pipeline actually did vs what was requested (codec
+    # substitutions, resampler downgrades). Goes into the export verbatim.
+    disclosure: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass

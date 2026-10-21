@@ -102,6 +102,14 @@ TRANSLATIONS = {
         "trial": "Trial",
         "score": "Score",
         "pvalue": "p-value (one-tailed)",
+        "planned_n": "Planned N",
+        "planned_n_tooltip": (
+            "Trials planned BEFORE the test (pre-registration).\n"
+            "The binomial p-value is only valid for an N fixed in\n"
+            "advance. Stopping because the running p-value looks good\n"
+            "inflates false positives. 0 = not registered: no verdict\n"
+            "is presented as final."
+        ),
         "x_eq_a": "X = A",
         "x_eq_b": "X = B",
         "export_json": "Export JSON",
@@ -226,6 +234,13 @@ TRANSLATIONS = {
         "trial": "Lượt",
         "score": "Điểm",
         "pvalue": "p-value (một phía)",
+        "planned_n": "N dự kiến",
+        "planned_n_tooltip": (
+            "Số lượt định TRƯỚC khi bắt đầu (pre-registration).\n"
+            "p-value nhị phân chỉ có ý nghĩa với N cố định từ đầu.\n"
+            "Dừng lại khi p-value trông đẹp sẽ làm tăng báo giả.\n"
+            "0 = không đăng ký: không có kết luận chính thức."
+        ),
         "x_eq_a": "X = A",
         "x_eq_b": "X = B",
         "export_json": "Xuất JSON",
@@ -373,7 +388,7 @@ class MainWindow(QMainWindow):
 
         self.pipeline = AudioPipeline()
         self.player = SynchronizedABXPlayer()
-        self.engine = ABXEngine()
+        self.engine = self._make_engine()
         self.logger = ExperimentLogger()
 
         self.catalog = codec_catalog()
@@ -394,11 +409,7 @@ class MainWindow(QMainWindow):
         self.prepare_worker: Optional[PrepareWorker] = None
         self._active_stamp: Optional[str] = None
         self._mapping_mode_pending: str = "fixed"
-        self._display_to_source = {"A": "A", "B": "B"}
-        self._blind_same_mapping_streak = 0
-        self._blind_base_swap_probability = 0.5
-        self._blind_streak_probability_step = 0.07
-        self._blind_max_swap_probability = 0.88
+        # (blinding lives in core.abx now: fair coin per trial, auditable)
         self._active_work_dir: Optional[Path] = None
 
         self._build_ui()
@@ -1558,6 +1569,16 @@ class MainWindow(QMainWindow):
         self.score_label = QLabel(f"{self._t('score')}: 0/0")
         self.pvalue_label = QLabel(f"{self._t('pvalue')}: 1.0000")
 
+        # Pre-registration: N must be fixed BEFORE the first answer for the
+        # binomial p-value to mean anything. 0 = not registered (no verdict).
+        self.planned_trials_spin = QSpinBox()
+        self.planned_trials_spin.setRange(0, 500)
+        self.planned_trials_spin.setValue(16)
+        self.planned_trials_spin.setSingleStep(1)
+        self.planned_trials_spin.setToolTip(self._t("planned_n_tooltip"))
+        self.planned_trials_spin.valueChanged.connect(self._on_planned_trials_changed)
+        self.planned_trials_label = QLabel(self._t("planned_n"))
+
         self.answer_a = QPushButton(self._t("x_eq_a"))
         self.answer_b = QPushButton(self._t("x_eq_b"))
         self.answer_a.clicked.connect(lambda: self.on_answer("A"))
@@ -1569,6 +1590,8 @@ class MainWindow(QMainWindow):
         abx_row.addWidget(self.trial_label, 0, 0)
         abx_row.addWidget(self.score_label, 0, 1)
         abx_row.addWidget(self.pvalue_label, 0, 2)
+        abx_row.addWidget(self.planned_trials_label, 0, 3)
+        abx_row.addWidget(self.planned_trials_spin, 0, 4)
         abx_row.addWidget(self.answer_a, 1, 0)
         abx_row.addWidget(self.answer_b, 1, 1)
         abx_row.addWidget(self.cancel_session_btn, 1, 2)
@@ -1786,9 +1809,7 @@ class MainWindow(QMainWindow):
         self.player.load_buffers(arr_a, arr_b, prepared.target_sample_rate)
 
         mapping_mode = self._mapping_mode_pending
-        self._configure_display_mapping(mapping_mode)
-
-        self.engine = ABXEngine()
+        self.engine = self._make_engine(mapping_mode)
         self._sync_player_x_mapping()
 
         self.logger = ExperimentLogger()
@@ -1812,7 +1833,7 @@ class MainWindow(QMainWindow):
                 "bitrate_a_kbps": prepared.track_a.bitrate_kbps,
                 "bitrate_b_kbps": prepared.track_b.bitrate_kbps,
                 "ab_label_mapping_mode": mapping_mode,
-                "ab_label_mapping": dict(self._display_to_source),
+                "ab_label_mapping": self.engine.display_mapping,
                 "validation": asdict(prepared.validation),
                 "track_a": asdict(prepared.track_a),
                 "track_b": asdict(prepared.track_b),
@@ -1840,48 +1861,30 @@ class MainWindow(QMainWindow):
         self._refresh_diagnostics_panel()
 
     def _configure_display_mapping(self, mapping_mode: str) -> None:
-        if mapping_mode == "blind_random":
-            if random.SystemRandom().random() < 0.5:
-                self._display_to_source = {"A": "A", "B": "B"}
-            else:
-                self._display_to_source = {"A": "B", "B": "A"}
-            self._blind_same_mapping_streak = 0
-            return
-        self._display_to_source = {"A": "A", "B": "B"}
-        self._blind_same_mapping_streak = 0
+        """Legacy entry point kept for call-site stability.
+
+        The display mapping is now owned by the engine (independent fair coin
+        per trial). The previous streak heuristics (0.5 + 0.07*streak, capped
+        at 0.88) made the mapping anti-persistent: above 50% swap probability,
+        the next mapping is MORE likely to differ from the last one, so the
+        mapping becomes predictable from its own history. A fair coin is both
+        simpler and provably unbiased. See tests/test_legacy_blind_bug.py.
+        """
+        self.engine.set_label_mode(
+            "blind_random" if mapping_mode == "blind_random" else "fixed"
+        )
 
     def _advance_blind_mapping_if_needed(self) -> bool:
-        # In blind mode, randomize label mapping after each completed trial.
-        if self._mapping_mode_pending != "blind_random":
-            return False
-
-        prev = dict(self._display_to_source)
-
-        # Start near true-random 50/50 and only bias toward swap gradually
-        # as the no-change streak grows.
-        swap_probability = min(
-            self._blind_base_swap_probability
-            + (self._blind_streak_probability_step * self._blind_same_mapping_streak),
-            self._blind_max_swap_probability,
-        )
-        swap = random.SystemRandom().random() < swap_probability
-        if swap:
-            self._display_to_source = {"A": prev["B"], "B": prev["A"]}
-        else:
-            self._display_to_source = dict(prev)
-
-        changed = self._display_to_source != prev
-        if changed:
-            self._blind_same_mapping_streak = 0
-        else:
-            self._blind_same_mapping_streak += 1
-        return changed
+        """No longer advances anything: the engine stages the next trial's
+        mapping inside submit_answer. Kept so diagnostics call sites work."""
+        return False
 
     def _resolve_display_source(self, display_label: str) -> str:
         label = display_label.strip().upper()
-        if label not in ("A", "B"):
+        mapping = self.engine.display_mapping
+        if label not in mapping:
             return label
-        return self._display_to_source[label]
+        return mapping[label]
 
     def _sync_player_x_mapping(self) -> None:
         x_display = self.engine.current_x_is
@@ -1974,12 +1977,13 @@ class MainWindow(QMainWindow):
             return
 
         x_is_before = self.engine.current_x_is
-        mapping_before = dict(self._display_to_source)
-        x_source_before = self._resolve_display_source(x_is_before)
+        mapping_before = self.engine.display_mapping
+        x_source_before = self.engine.current_x_source
         answer_source_before = self._resolve_display_source(answer)
         correct = self.engine.submit_answer(answer)
-
-        mapping_changed = self._advance_blind_mapping_if_needed()
+        # "changed" is observed (mapping at this trial vs the staged next one),
+        # not produced by a swap heuristic.
+        mapping_changed = mapping_before != self.engine.display_mapping
 
         stats = self.engine.stats()
         self.logger.add_trial(
@@ -2005,7 +2009,7 @@ class MainWindow(QMainWindow):
         self.player.stop()
         self.player.set_position_seconds(0.0)
 
-        self.engine = ABXEngine()
+        self.engine = self._make_engine(self._mapping_mode_pending)
         self._sync_player_x_mapping()
 
         self.logger = ExperimentLogger()
@@ -2029,7 +2033,7 @@ class MainWindow(QMainWindow):
                     "bitrate_a_kbps": self.prepared_session.track_a.bitrate_kbps,
                     "bitrate_b_kbps": self.prepared_session.track_b.bitrate_kbps,
                     "ab_label_mapping_mode": self._mapping_mode_pending,
-                    "ab_label_mapping": dict(self._display_to_source),
+                    "ab_label_mapping": self.engine.display_mapping,
                     "validation": asdict(self.prepared_session.validation),
                     "track_a": asdict(self.prepared_session.track_a),
                     "track_b": asdict(self.prepared_session.track_b),
@@ -2112,7 +2116,7 @@ class MainWindow(QMainWindow):
         lines.append("")
         lines.append(self._t("diag_mapping_audit"))
         lines.append(
-            f"{self._t('diag_current_mapping')}: A->{self._display_to_source['A']} | B->{self._display_to_source['B']}"
+            f"{self._t('diag_current_mapping')}: A->{self.engine.display_mapping['A']} | B->{self.engine.display_mapping['B']}"
         )
         if not self.logger.trials:
             lines.append(self._t("diag_no_mapping_entries"))
@@ -2157,7 +2161,15 @@ class MainWindow(QMainWindow):
         s = self.engine.stats()
         self.trial_label.setText(f"{self._t('trial')}: {s.total_trials + 1}")
         self.score_label.setText(f"{self._t('score')}: {s.correct_trials}/{s.total_trials}")
-        self.pvalue_label.setText(f"{self._t('pvalue')}: {s.p_value_one_tailed:.6f}")
+        # Never present a p-value from an unregistered/unfinished run as a
+        # verdict: that is the optional-stopping / p-hacking affordance.
+        self.pvalue_label.setText(f"{self._t('pvalue')}: {s.p_value_text.split(': ', 1)[-1]}")
+        if s.planned_trials:
+            self.pvalue_label.setText(
+                f"{self._t('pvalue')}: {s.p_value_one_tailed:.5f} "
+                f"({'final' if s.is_final else 'provisional'}, "
+                f"need >={s.required_correct}/{s.planned_trials})"
+            )
 
     def _refresh_transport(self) -> None:
         if self.prepared_session is None:
@@ -2180,6 +2192,36 @@ class MainWindow(QMainWindow):
         r = ms % 1000
         return f"{m:02d}:{s:02d}.{r:03d}"
 
+    def _stamp_export(self) -> None:
+        """Attach disclosure, verifiability and full statistics at export time.
+
+        The exported file is the citation artifact. Everything that could make
+        the run differ from what the user asked for -- codec substitution,
+        resampler downgrade -- must be in it, and the commit-reveal block lets
+        a third party confirm the X sequence was fixed in advance.
+        """
+        prepared = self.prepared_session
+        stats = self.engine.stats()
+        disclosure = dict(getattr(prepared, "disclosure", {}) or {}) if prepared else {}
+        disclosure["audio_device"] = {
+            "exclusive_mode_requested": self.exclusive_mode.isChecked(),
+        }
+        self.logger.seal(
+            disclosure=disclosure,
+            verifiability=self.engine.reveal(),
+            statistics={
+                "total_trials": stats.total_trials,
+                "correct_trials": stats.correct_trials,
+                "p_value_one_tailed": stats.p_value_one_tailed,
+                "planned_trials": stats.planned_trials,
+                "is_final": stats.is_final,
+                "provisional": stats.provisional,
+                "required_correct": stats.required_correct,
+                "significant": stats.significant,
+                "ability_ci95": stats.ability_ci95,
+            },
+        )
+
     def on_export_json(self) -> None:
         if not self.logger.trials:
             QMessageBox.information(self, self._t("nothing_export_title"), self._t("nothing_export_text"))
@@ -2194,6 +2236,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
+            self._stamp_export()
             self.logger.export_json(path)
             self._set_status(f"exported JSON: {path}")
         except Exception as exc:
@@ -2213,6 +2256,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
+            self._stamp_export()
             self.logger.export_csv(path)
             self._set_status(f"exported CSV: {path}")
         except Exception as exc:

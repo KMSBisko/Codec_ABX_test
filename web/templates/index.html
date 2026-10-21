@@ -104,6 +104,15 @@
                 </div>
             </div>
 
+            <!-- Pre-registration: the trial count must be fixed BEFORE the
+                 first answer for the binomial p-value to mean anything. -->
+            <div class="config-row" id="plannedTrialsRow">
+                <label for="plannedTrials" data-i18n="planned_n_label">Planned N (pre-registered trials)</label>
+                <input type="number" id="plannedTrials" min="0" max="500" step="1" value="16"
+                       title="Fixed before the first answer. 0 = not registered: no verdict is presented as final.">
+                <span class="hint" data-i18n="planned_n_hint">Set this before you answer. Stopping because the running p-value looks good inflates false positives.</span>
+            </div>
+
             <!-- Preprocess Button & Progress -->
             <div class="preprocess-area">
                 <button id="btnPreprocess" class="btn btn-primary" onclick="startPreprocess()" data-i18n="preprocess_btn">▶ Preprocess & Validate</button>

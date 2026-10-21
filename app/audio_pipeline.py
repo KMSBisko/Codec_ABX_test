@@ -16,6 +16,8 @@ import pyloudnorm as pyln
 import soundfile as sf
 from scipy import signal
 
+from core.alignment import align_pair, estimate_lag, null_depth_db
+
 from .models import (
     CodecProfile,
     PipelineStageConfig,
@@ -37,11 +39,34 @@ class PipelineCancelled(PipelineError):
     pass
 
 
+class CodecUnavailableError(PipelineError):
+    """Requested codec cannot be encoded by this ffmpeg build."""
+
+
 class AudioPipeline:
-    def __init__(self, ffmpeg_bin: str = "ffmpeg", ffprobe_bin: str = "ffprobe") -> None:
+    def __init__(
+        self,
+        ffmpeg_bin: str = "ffmpeg",
+        ffprobe_bin: str = "ffprobe",
+        strict_codecs: bool = True,
+        allow_codec_substitution: bool = False,
+    ) -> None:
         self.ffmpeg_bin = ffmpeg_bin
         self.ffprobe_bin = ffprobe_bin
         self.catalog = codec_catalog()
+        # strict_codecs: a requested real codec that the ffmpeg build cannot
+        # encode is a HARD ERROR, never a silent AAC stand-in. A test whose
+        # purpose is to name a codec must not quietly change the codec under
+        # test -- the exported report is the citation artifact, and the old
+        # substitution was visible in the UI but absent from the export, so a
+        # "real aptX vs LDAC" run on a machine without libldac exported as
+        # aptX while it had encoded AAC.
+        # allow_codec_substitution is the explicit opt-in escape hatch.
+        self.strict_codecs = strict_codecs
+        self.allow_codec_substitution = allow_codec_substitution
+        self._requested_resample_engine = "soxr"
+        self._resample_fallback_used = False
+        self._codec_fallbacks: list = []
         self._resample_filter = "aresample=resampler=soxr:precision=33"
         self._available_encoders: Optional[Set[str]] = None
         self._cancel_requested = False
@@ -163,6 +188,29 @@ class AudioPipeline:
         if fallback_profile is None:
             return requested_profile
 
+        if not self.allow_codec_substitution:
+            raise CodecUnavailableError(
+                f"Encoder {requested_profile.ffmpeg_encoder!r} for "
+                f"{requested_profile.display_name!r} is not available in this "
+                f"ffmpeg build. Refusing to substitute "
+                f"{fallback_profile.display_name!r}: the result would be "
+                f"reported as {requested_profile.display_name!r} while "
+                f"encoding a different codec. Install an ffmpeg build with "
+                f"{requested_profile.ffmpeg_encoder!r}, or explicitly select "
+                f"the simulated profile if you intend to test a proxy."
+            )
+
+        self._codec_fallbacks.append(
+            {
+                "requested_codec_id": requested_profile.codec_id,
+                "requested_codec_name": requested_profile.display_name,
+                "requested_encoder": requested_profile.ffmpeg_encoder,
+                "actual_codec_id": fallback_profile.codec_id,
+                "actual_codec_name": fallback_profile.display_name,
+                "actual_encoder": fallback_profile.ffmpeg_encoder,
+                "reason": "encoder_unavailable_in_ffmpeg_build",
+            }
+        )
         return fallback_profile
 
     @staticmethod
@@ -242,10 +290,25 @@ class AudioPipeline:
                 and "Requested resampling engine is unavailable" in error_text
             ):
                 self._resample_filter = "aresample"
+                self._resample_fallback_used = True
                 retry_args = [self._resample_filter if arg == previous_filter else arg for arg in args]
                 self._run(retry_args)
                 return
             raise
+
+    def _disclosure_block(self) -> Dict[str, object]:
+        """Everything that could make the exported report differ from what the
+        user asked for. Must land in the JSON export verbatim."""
+        return {
+            "codec_fallbacks": list(self._codec_fallbacks),
+            "codec_substitution_allowed": self.allow_codec_substitution,
+            "resample": {
+                "requested_engine": self._requested_resample_engine,
+                "engine_used": self._resample_engine_name(),
+                "downgraded": self._resample_fallback_used,
+                "filter_string": self._resample_filter,
+            },
+        }
 
     def _resample_engine_name(self) -> str:
         if "soxr" in self._resample_filter:
@@ -509,27 +572,14 @@ class AudioPipeline:
         return data, int(sr)
 
     @staticmethod
-    def _estimate_lag_samples(a: np.ndarray, b: np.ndarray, max_lag: int) -> int:
-        a_mono = np.mean(a, axis=1)
-        b_mono = np.mean(b, axis=1)
-
-        corr = signal.correlate(b_mono, a_mono, mode="full", method="fft")
-        lags = signal.correlation_lags(len(b_mono), len(a_mono), mode="full")
-        mask = np.abs(lags) <= max_lag
-        if not np.any(mask):
-            return 0
-        selected = np.argmax(corr[mask])
-        return int(lags[mask][selected])
+    def _estimate_lag_samples(a: np.ndarray, b: np.ndarray, max_lag: int) -> Tuple[int, float]:
+        """Delegates to core.alignment (shared with the web build)."""
+        return estimate_lag(a, b, max_lag_samples=max_lag)
 
     @staticmethod
     def _apply_alignment(a: np.ndarray, b: np.ndarray, lag: int) -> Tuple[np.ndarray, np.ndarray]:
-        # Positive lag means B is delayed and must be shifted earlier.
-        if lag > 0:
-            b = b[lag:]
-        elif lag < 0:
-            a = a[-lag:]
-        min_len = min(len(a), len(b))
-        return a[:min_len], b[:min_len]
+        """Shift-then-crop via core.alignment. Never pads with silence."""
+        return align_pair(a, b, lag)
 
     @staticmethod
     def _normalize_pair_to_target(
@@ -716,7 +766,9 @@ class AudioPipeline:
             raise PipelineError("Decoded outputs did not preserve target sample rate")
 
         max_lag = int(0.100 * target_sr)
-        lag = self._estimate_lag_samples(arr_a, arr_b, max_lag=max_lag)
+        lag, alignment_confidence = self._estimate_lag_samples(
+            arr_a, arr_b, max_lag=max_lag
+        )
         arr_a, arr_b = self._apply_alignment(arr_a, arr_b, lag)
 
         if bandwidth_limit_a_enabled:
@@ -736,6 +788,11 @@ class AudioPipeline:
             target_lufs=-16.0,
         )
 
+        # Null depth on the FINAL delivered pair: proves the level/phase
+        # matching the whole pipeline was built to achieve.
+        null_depth = null_depth_db(arr_a, arr_b)
+
+
         norm_a_path = wd / "track_a_normalized.wav"
         norm_b_path = wd / "track_b_normalized.wav"
         self._write_float_wav(str(norm_a_path), arr_a, target_sr)
@@ -750,6 +807,15 @@ class AudioPipeline:
         if loudness_diff >= 0.1:
             notes.append("Loudness difference exceeds 0.1 dB target")
 
+        # A silent wrong lag invalidates the entire comparison, so a weak
+        # correlation estimate must be visible, not swallowed.
+        if alignment_confidence < 0.5:
+            notes.append(
+                f"alignment estimate is weak (normalized correlation "
+                f"{alignment_confidence:.2f}): A and B may not be sample-"
+                f"aligned on identical content; treat this run as suspect"
+            )
+
         validation = SessionValidation(
             sample_rate_equal=(sr_a == sr_b == target_sr),
             lengths_equal=(len(arr_a) == len(arr_b)),
@@ -757,6 +823,8 @@ class AudioPipeline:
             alignment_lag_samples=int(lag),
             has_switch_guard=True,
             notes=notes,
+            alignment_confidence=round(float(alignment_confidence), 5),
+            null_depth_db=float(null_depth),
         )
 
         duration_seconds = min_len / float(target_sr)
@@ -787,6 +855,7 @@ class AudioPipeline:
         )
 
         session = PreparedSession(
+            disclosure=self._disclosure_block(),
             input_file=str(p_in),
             working_input_wav=str(working_wav),
             original_sample_rate=original_sr,

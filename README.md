@@ -30,8 +30,13 @@ Desktop ABX tool for local codec listening tests with strict preprocessing and v
   - Side A and Side B can be configured independently
   - Cutoff per side: 14 kHz / 16 kHz / 18 kHz
 - ABX engine:
-  - Randomized X each trial
-  - Running score + one-tailed binomial p-value
+  - Randomized X each trial (independent fair coin, derived from a random
+    secret, so the sequence is committed up front and verifiable afterwards)
+  - Pre-registered trial count: the verdict is FINAL only at the planned N;
+    below it the p-value is labelled provisional, so a run cannot be stopped
+    early because the number looks good
+  - Pass threshold announced before the test (16 trials needs >= 12)
+  - Ability estimate with an exact Clopper-Pearson 95% CI, not just a p-value
 - Playback:
   - Shared global timeline
   - Scrub preserves alignment
@@ -53,10 +58,14 @@ Direct:
 - aptX HD (`aptx_hd`)
 - LDAC (`libldac`, only if your ffmpeg build includes it)
 
-Fallback behavior:
-- Simulated profiles are no longer exposed as selectable UI options.
-- If `aptx`, `aptx_hd`, or `libldac` encoders are unavailable in your ffmpeg build,
-  the pipeline automatically falls back internally to AAC-based simulation at the selected bitrate.
+Missing encoders (strict by default):
+- If a requested codec (`aptx`, `aptx_hd`, `libldac`) is not in your ffmpeg build,
+  preprocessing **fails with a message naming the encoder**. It is not substituted.
+- A run reported as "aptX" must not silently have encoded AAC: the exported
+  report, not the UI, is what people cite.
+- To deliberately test a proxy, select a `Simulated ...` profile explicitly.
+  Every substitution is recorded in the export under
+  `session.disclosure.codec_fallbacks` with the real encoder name.
 
 Additional bitrate notes:
 - Lower bitrate options are available for direct codecs (Opus/AAC/Ogg Vorbis/SBC) to stress-test artifact audibility.
@@ -159,6 +168,26 @@ This example file is optional and is not required when distributing only `run_ab
   - Full mapping audit is placed in a lower section so it is not immediately visible
 8. Export results as JSON/CSV.
 
+## Test Validity Evidence
+
+Every export carries the measurements that back up the test's own claims:
+
+- **Null depth** - residual level after subtracting B from A. Identical
+  processing nulls to `-inf`; lossy-vs-lossless measured about -19 dB. A
+  measurement of level/phase matching, not a claim of it.
+- **Alignment confidence** - normalized cross-correlation peak. A weak estimate
+  is surfaced in the notes instead of silently mis-aligning the pair.
+- **Loudness delta BEFORE normalization** - the level work the pipelines caused,
+  plus the gain applied to each side. ~0.5 dB is the classic trap: it reads as
+  "clearer highs", not as "louder". The pre-Phase-0 build compared LUFS *after*
+  matching both sides to one target, so it printed 0.0000 dB for every run and
+  could not fail; a 32 vs 128 kbps Opus pair measured 0.578 dB and passed as
+  perfect.
+- **Codec substitution disclosure** - what was requested vs what really encoded.
+- **X-sequence commitment** - SHA-256 of a random secret, published before the
+  test and revealed in the export. A reader can recompute the whole X sequence
+  and confirm the tool did not cherry-pick X after seeing the answers.
+
 ## Notes On Experimental Validity
 
 - For strongest validity, keep all OS audio enhancements disabled.
@@ -175,11 +204,22 @@ The app uses a temporary working directory for preprocessing intermediates.
 
 See `app/main.py`.
 
-## Quick Check
+## Development
 
-```powershell
-python -m compileall app run_abx.py
+```bash
+python3 -m venv .venv && .venv/bin/python -m ensurepip --upgrade
+.venv/bin/python -m pip install -r requirements-dev.txt  # core suite: no Qt needed
+.venv/bin/python -m pytest -q                 # statistics, blinding, alignment, web API
+.venv/bin/python -m pytest -q -m pipeline     # needs ffmpeg: real encode/decode
 ```
+
+`core/` (statistics, blinding, alignment, report wording) is shared by the
+desktop and web shells and imports nothing beyond the standard library and
+numpy. `tests/test_core_discipline.py` enforces that, so the two engines cannot
+silently diverge again.
+
+Known headless gaps: the desktop app needs the `libgl1` and `libportaudio2`
+system packages on top of the Python requirements.
 
 ---
 
@@ -215,8 +255,11 @@ Công cụ ABX desktop để kiểm tra nghe codec cục bộ với các ràng b
   - Cấu hình độc lập cho nhánh A và nhánh B
   - Điểm cắt mỗi nhánh: 14 kHz / 16 kHz / 18 kHz
 - ABX engine:
-  - X được random ở mỗi lượt
-  - Điểm số chạy + p-value nhị thức một phía
+  - X random mỗi lượt (ngẫu nhiên độc lập, sinh từ secret đã cam kết trước,
+    có thể xác minh sau khi chạy)
+  - N đăng ký trước: kết luận chỉ FINAL khi đạt N; dưới N p-value là provisional
+  - Ngưỡng công bố TRƯỚC khi test (16 lượt cần >= 12)
+  - Ước lượng khả năng phân biệt kèm khoảng tin cậy 95% (Clopper-Pearson)
 - Playback:
   - Timeline toàn cục dùng chung
   - Scrub vẫn giữ căn chỉnh

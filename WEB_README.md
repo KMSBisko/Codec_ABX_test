@@ -18,7 +18,9 @@ A web-based ABX listening test tool for comparing audio codec pipelines. Upload 
 | **Timeline Scrubber** | Real-time seek with visual feedback |
 | **Auto-Advance Trials** | After submitting an answer, the next trial starts automatically while audio keeps playing |
 | **Trial Management** | Start trials, submit answers, get instant correct/incorrect feedback |
-| **Statistics** | Live p-value (one-tailed binomial test), trial count, score tracking |
+| **Statistics** | One-tailed binomial p-value with **pre-registered N** (verdict is FINAL only at N, provisional below), ability CI, score tracking |
+| **Blinding** | `x_is` is never sent to the browser. X audio is served by opaque token, resolved server-side |
+| **Validity evidence** | Diagnostics + export include null depth, alignment confidence, pre-normalization loudness delta, codec substitution disclosure, and the X-sequence commitment |
 | **Export** | JSON or CSV export of trial results |
 | **Diagnostics Panel** | Full session metadata including loudness measurements, alignment lag, codec chain details, validation notes |
 | **Themes** | Light / Dark / OLED — persisted per browser via localStorage |
@@ -122,6 +124,7 @@ web/
 | `POST` | `/api/preprocess/cancel` | Cancel running preprocessing |
 | `GET`  | `/api/audio/info` | Audio metadata (duration, sample rate, buffer identity flag) |
 | `GET`  | `/api/audio/a` | Stream Side A processed audio (WAV) |
+| `GET`  | `/api/audio/x?token=…` | Stream the current trial's X audio. Resolved **server-side** from the trial token; the response reveals no A/B identity |
 | `GET`  | `/api/audio/b` | Stream Side B processed audio (WAV) |
 | `GET`  | `/api/audio/<side>/segment` | Stream a time segment of audio (query params: `start`, `end`) |
 | `POST` | `/api/trial/start` | Start a new ABX trial (returns X assignment and label mapping) |
@@ -152,6 +155,23 @@ The following codecs are available for pipeline stages:
 | `sim_aptx_hd` | Simulated aptX HD (AAC) | 384/512/576 kbps | AAC used as aptX HD proxy |
 | `sim_ldac` | Simulated LDAC (AAC) | 330/660/990 kbps | AAC used as LDAC proxy |
 
+## Known Limitations (read before hosting publicly)
+
+- **Single in-memory session.** `web/app.py` keeps one module-level
+  `session = SessionState()`. Two browser tabs share it, and a restart loses
+  it. The `gunicorn --workers 2` recipe below therefore gives you two
+  *independent* sessions with uploads routed round-robin - it does not
+  support concurrent users. Per-session state, persistence and auth are
+  Phase 2 work; until then run exactly one worker.
+- **Uncontrolled output path.** A browser cannot bypass the OS mixer, and
+  Bluetooth headphones re-encode on output (SBC/AAC/aptX/LDAC). A web run
+  therefore answers "can listeners tell on their own gear", not "is there any
+  audible difference at all". The desktop app is the instrument for the second
+  question.
+- `sim_aptx` / `sim_aptx_hd` / `sim_ldac` are AAC-based proxies and are labelled
+  as such in the catalog. The desktop build refuses a missing real codec
+  outright rather than substituting.
+
 ## Deployment Options
 
 ### Option 1: Docker (any Linux server)
@@ -164,7 +184,8 @@ docker compose up -d --build
 
 ```bash
 pip install gunicorn
-gunicorn --bind 0.0.0.0:5000 --workers 2 "web.app:app"
+gunicorn --bind 0.0.0.0:5000 --workers 1 "web.app:app"
+# exactly one worker: state is a single in-memory session (see Known Limitations)
 ```
 
 ### Option 3: Heroku / Railway / Render

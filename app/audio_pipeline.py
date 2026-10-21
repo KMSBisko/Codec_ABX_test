@@ -20,6 +20,7 @@ from core.alignment import align_pair, estimate_lag, null_depth_db
 
 from .models import (
     CodecProfile,
+    LoudnessReport,
     PipelineStageConfig,
     PipelineStageResult,
     PreparedSession,
@@ -614,12 +615,31 @@ class AudioPipeline:
         final_lufs_a = meter.integrated_loudness(a2)
         final_lufs_b = meter.integrated_loudness(b2)
 
+        loudness_report = LoudnessReport(
+            pre_lufs_a=float(lufs_a),
+            pre_lufs_b=float(lufs_b),
+            post_lufs_a=float(final_lufs_a),
+            post_lufs_b=float(final_lufs_b),
+            gain_a_db=float(gain_a_db),
+            gain_b_db=float(gain_b_db),
+            global_trim_db=float(global_trim_db),
+            target_lufs=float(target_lufs),
+        )
+
         peak_a_lin = float(np.max(np.abs(a2)))
         peak_b_lin = float(np.max(np.abs(b2)))
         peak_a_dbfs = -999.0 if peak_a_lin <= 0 else 20.0 * math.log10(peak_a_lin)
         peak_b_dbfs = -999.0 if peak_b_lin <= 0 else 20.0 * math.log10(peak_b_lin)
 
-        return a2, b2, float(final_lufs_a), float(final_lufs_b), peak_a_dbfs, peak_b_dbfs
+        return (
+            a2,
+            b2,
+            float(final_lufs_a),
+            float(final_lufs_b),
+            peak_a_dbfs,
+            peak_b_dbfs,
+            loudness_report,
+        )
 
     @staticmethod
     def _apply_lowpass(data: np.ndarray, sample_rate: int, cutoff_hz: int) -> np.ndarray:
@@ -781,7 +801,15 @@ class AudioPipeline:
                 raise PipelineError("Bandwidth limit cutoff B must be 14 kHz, 16 kHz, or 18 kHz")
             arr_b = self._apply_lowpass(arr_b, target_sr, int(bandwidth_limit_b_hz))
 
-        arr_a, arr_b, lufs_a, lufs_b, peak_a_dbfs, peak_b_dbfs = self._normalize_pair_to_target(
+        (
+            arr_a,
+            arr_b,
+            lufs_a,
+            lufs_b,
+            peak_a_dbfs,
+            peak_b_dbfs,
+            loudness_report,
+        ) = self._normalize_pair_to_target(
             arr_a,
             arr_b,
             target_sr,
@@ -809,6 +837,19 @@ class AudioPipeline:
 
         # A silent wrong lag invalidates the entire comparison, so a weak
         # correlation estimate must be visible, not swallowed.
+        # Level matching is the classic ABX trap: a ~0.5 dB difference reads
+        # as "clearer highs", not as "louder". Normalization fixes the DELIVERY
+        # (residual ~0), so the residual can never fail; what a reader needs is
+        # how much work normalization had to do.
+        if loudness_report.pre_normalization_delta_db > 0.5:
+            notes.append(
+                f"pipelines differed by "
+                f"{loudness_report.pre_normalization_delta_db:.2f} dB before "
+                f"normalization (gain A={loudness_report.gain_a_db:+.2f} dB, "
+                f"B={loudness_report.gain_b_db:+.2f} dB): loudness matching "
+                f"did substantial work, compare only the level-matched render"
+            )
+
         if alignment_confidence < 0.5:
             notes.append(
                 f"alignment estimate is weak (normalized correlation "
@@ -820,6 +861,7 @@ class AudioPipeline:
             sample_rate_equal=(sr_a == sr_b == target_sr),
             lengths_equal=(len(arr_a) == len(arr_b)),
             loudness_diff_db=float(loudness_diff),
+            loudness=loudness_report,
             alignment_lag_samples=int(lag),
             has_switch_guard=True,
             notes=notes,

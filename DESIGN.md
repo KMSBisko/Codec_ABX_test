@@ -10,7 +10,16 @@ Desktop application for conducting locally-executed ABX listening tests to compa
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                  PySide6 GUI (main.py)               │
+│   core/  (shared by BOTH shells; stdlib + numpy)     │
+│   stats.py  exact binomial p, Clopper-Pearson CI,    │
+│             Holm-Bonferroni, power -> N              │
+│   abx.py    ONE trial engine, fair-coin blinding,    │
+│             pre-registration, commit-reveal          │
+│   alignment.py  bounded lag search, shift-then-crop, │
+│                 null depth                           │
+│   report.py shared validity-evidence wording         │
+├──────────────────────────────────────────────────────┤
+│                  PyQt6 GUI (main.py)                 │
 │  Input Config │ Codec Config │ Playback │ Diagnostics│
 ├──────────────────────────────────────────────────────┤
 │  AudioPipeline   │ ABXEngine    │ SynchronizedABXPlayer │ ExperimentLogger │
@@ -22,7 +31,9 @@ Desktop application for conducting locally-executed ABX listening tests to compa
 └──────────────────────────────────────────────────────┘
 ```
 
-**Tech Stack:** Python 3.11+, PySide6, sounddevice (PortAudio), numpy, pysilence, ffmpeg/ffprobe. Packaged via PyInstaller for Windows EXE distribution.
+**Tech Stack:** Python 3.11+, PyQt6, sounddevice (PortAudio), numpy, scipy, pyloudnorm, ffmpeg/ffprobe. Packaged via PyInstaller for Windows EXE distribution.
+
+**Shell discipline:** the desktop GUI and the Flask web app are thin shells over `core/`. `core/` must not import PyQt6, Flask, sounddevice or any audio backend - `tests/test_core_discipline.py` enforces this. Before Phase 0 the two shells carried independent trial engines with different randomness and different blinding heuristics, so the same study produced different results per shell.
 
 ---
 

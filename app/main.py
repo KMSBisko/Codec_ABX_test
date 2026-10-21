@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .abx_engine import ABXEngine
+from .core_report_shim import validity_lines
 from .audio_pipeline import AudioPipeline, PipelineCancelled, PipelineError
 from .logger import ExperimentLogger
 from .models import PipelineStageConfig, ProcessingMode, SampleRateMode, TrialResult, codec_catalog
@@ -148,6 +149,16 @@ TRANSLATIONS = {
         "diag_mode": "Mode",
         "diag_target_sr": "Target SR",
         "diag_resample_engine": "Resample engine",
+        "diag_validity_block": "── Test validity evidence ──",
+        "diag_null_depth": "Null depth (A-B residual)",
+        "diag_alignment": "Alignment",
+        "diag_loudness_pre": "Loudness delta BEFORE normalization",
+        "diag_loudness_residual": "Loudness residual after matching",
+        "diag_codec_substituted": "Codec substituted",
+        "diag_note": "NOTE",
+        "diag_verdict": "Verdict",
+        "diag_no_planned_n": "Verdict: no N pre-registered - p-value is descriptive, not a verdict",
+        "diag_commitment": "X-sequence commitment",
         "diag_trials": "Trials",
         "diag_correct": "Correct",
         "diag_trial_details": "Trial Details",
@@ -279,6 +290,16 @@ TRANSLATIONS = {
         "diag_mode": "Chế độ",
         "diag_target_sr": "Tần số mục tiêu",
         "diag_resample_engine": "Engine resample",
+        "diag_validity_block": "── Bằng chứng tính hợp lệ của phép thử ──",
+        "diag_null_depth": "Độ sâu null (phần dư A-B)",
+        "diag_alignment": "Căn chỉnh",
+        "diag_loudness_pre": "Chênh lệch loudness TRƯỚC chuẩn hóa",
+        "diag_loudness_residual": "Phần dư loudness sau căn bằng",
+        "diag_codec_substituted": "Codec đã bị thay thế",
+        "diag_note": "LƯU Ý",
+        "diag_verdict": "Kết luận",
+        "diag_no_planned_n": "Kết luận: chưa đăng ký N - p-value chỉ mô tả, không phải kết luận",
+        "diag_commitment": "Cam kết chuỗi X",
         "diag_trials": "Số lượt",
         "diag_correct": "Đúng",
         "diag_trial_details": "Chi tiết lượt",
@@ -2044,6 +2065,39 @@ class MainWindow(QMainWindow):
         self._set_status(self._t("status_session_cancelled"))
         self._refresh_diagnostics_panel()
 
+    def _validity_lines(self) -> list[str]:
+        """Delegates to core.report so desktop, web and the JSON export render
+        the same evidence with the same words."""
+        v = self.prepared_session.validation
+        rep = v.loudness
+        stats = self.engine.stats()
+        return validity_lines(
+            null_depth_db=v.null_depth_db,
+            alignment_lag_samples=v.alignment_lag_samples,
+            alignment_confidence=v.alignment_confidence,
+            loudness=(
+                None
+                if rep is None
+                else {
+                    "pre_delta_db": rep.pre_normalization_delta_db,
+                    "residual_delta_db": rep.residual_delta_db,
+                    "gain_a_db": rep.gain_a_db,
+                    "gain_b_db": rep.gain_b_db,
+                    "global_trim_db": rep.global_trim_db,
+                }
+            ),
+            disclosure=getattr(self.prepared_session, "disclosure", {}) or {},
+            notes=list(v.notes),
+            stats={
+                "planned_trials": stats.planned_trials,
+                "is_final": stats.is_final,
+                "required_correct": stats.required_correct,
+                "ability_ci95": stats.ability_ci95,
+            },
+            commitment=self.engine.session_commitment,
+            t=self._t,
+        )
+
     def _refresh_diagnostics_panel(self) -> None:
         if self.prepared_session is None:
             self.diagnostics_view.setPlainText(self._t("diag_none"))
@@ -2071,6 +2125,9 @@ class MainWindow(QMainWindow):
             f"{self._t('diag_trials')}: {stats.total_trials}",
             f"{self._t('diag_correct')}: {stats.correct_trials}",
             f"{self._t('pvalue')}: {stats.p_value_one_tailed:.6f}",
+            "",
+            self._t("diag_validity_block"),
+            *self._validity_lines(),
             "",
             f"{self._t('diag_pipeline_a_stages')}:",
         ]

@@ -46,14 +46,13 @@ from .models import (
     trial_result_to_dict,
 )
 
-import sys as _sys
 from core.abx import (
     LABEL_MODE_BLIND,
     LABEL_MODE_FIXED,
     ABXEngine as CoreABXEngine,
 )
 from core.alignment import align_pair, estimate_lag, null_depth_db
-from core.stats import holm_bonferroni, min_correct_for_significance
+from core.report import validity_lines
 
 # ── Flask App Setup ──────────────────────────────────────────────────────────
 
@@ -627,7 +626,25 @@ def _run_preprocess():
         apply_gain_ffmpeg(audio_a_aligned, audio_a_norm, gain_a, target_sr)
         apply_gain_ffmpeg(audio_b_aligned, audio_b_norm, gain_b, target_sr)
 
+        # Measured BEFORE gain is applied: this is the level work
+        # normalization had to do, which is the disclosure that matters.
+        # (The desktop build compared post-normalization LUFS, a check that
+        # can never fail; both now report pre-delta and residual.)
         loudness_diff = abs(loudness_a - loudness_b)
+
+        # Null depth on the DELIVERED pair, after level matching: the hard
+        # proof that A and B are level- and phase-aligned.
+        null_depth_final = null_depth_db(
+            load_wav_float(audio_a_norm), load_wav_float(audio_b_norm)
+        )
+        if loudness_diff > 0.5:
+            validation_notes_early = (
+                f"pipelines differed by {loudness_diff:.2f} dB before "
+                f"normalization (gain A={gain_a:+.2f} dB, B={gain_b:+.2f} dB): "
+                f"compare only the level-matched render"
+            )
+        else:
+            validation_notes_early = None
 
         # ── Phase 8: Validation ─────────────────────────────────────────────
         _set_phase("validation", 95, "Validating session...")
@@ -637,6 +654,13 @@ def _run_preprocess():
         dur_b = probe_duration(audio_b_norm)
 
         validation_notes = []
+        if validation_notes_early:
+            validation_notes.append(validation_notes_early)
+        if alignment_confidence < 0.5:
+            validation_notes.append(
+                f"alignment estimate is weak (normalized correlation "
+                f"{alignment_confidence:.2f}): treat this run as suspect"
+            )
         if sr_a != sr_b:
             validation_notes.append(f"Sample rate mismatch: A={sr_a}, B={sr_b}")
         if abs(dur_a - dur_b) > 0.01:
@@ -667,6 +691,15 @@ def _run_preprocess():
                 "alignment_lag_samples": alignment_lag,
                 "alignment_confidence": round(float(alignment_confidence), 5),
                 "null_depth_db_pre_loudness": round(float(pre_norm_null_db), 3),
+                "null_depth_db": (
+                    None
+                    if null_depth_final == float("-inf")
+                    else round(float(null_depth_final), 3)
+                ),
+                "null_depth_is_perfect": null_depth_final == float("-inf"),
+                "loudness_gain_a_db": round(float(gain_a), 3),
+                "loudness_gain_b_db": round(float(gain_b), 3),
+                "loudness_is_pre_normalization": True,
                 "validation_notes": validation_notes,
                 "stages_a_details": stages_a_results,
                 "stages_b_details": stages_b_results,
@@ -901,6 +934,42 @@ def audio_info():
 
 # ── API: ABX Trials ──────────────────────────────────────────────────────────
 
+def _validity_lines() -> List[str]:
+    """Same evidence block as the desktop panel, same wording (core.report)."""
+    meta = session.session_metadata or {}
+    stats = session.engine.stats()
+    has_loudness = "loudness_diff_db" in meta
+    return validity_lines(
+        null_depth_db=(
+            float("-inf")
+            if meta.get("null_depth_is_perfect")
+            else meta.get("null_depth_db")
+        ),
+        alignment_lag_samples=int(meta.get("alignment_lag_samples", 0)),
+        alignment_confidence=float(meta.get("alignment_confidence", 0.0)),
+        loudness=(
+            None
+            if not has_loudness
+            else {
+                "pre_delta_db": float(meta["loudness_diff_db"]),
+                "residual_delta_db": 0.0,
+                "gain_a_db": float(meta.get("loudness_gain_a_db", 0.0)),
+                "gain_b_db": float(meta.get("loudness_gain_b_db", 0.0)),
+                "global_trim_db": 0.0,
+            }
+        ),
+        disclosure=meta.get("disclosure", {}),
+        notes=list(meta.get("validation_notes", [])),
+        stats={
+            "planned_trials": stats["planned_trials"],
+            "is_final": stats["is_final"],
+            "required_correct": stats["required_correct"],
+            "ability_ci95": stats["ability_ci95"],
+        },
+        commitment=session.engine.session_commitment,
+    )
+
+
 def _trial_dict(trial) -> Dict[str, Any]:
     """core.abx Trial -> the legacy dict shape the UI/export already expects."""
     return {
@@ -980,6 +1049,7 @@ def get_diagnostics():
             "trials": [_trial_dict(t) for t in session.trials],
             "stats": session.stats(),
             "display_mapping": session.engine.pending_mapping,
+            "validity_lines": _validity_lines(),
             # legacy keys the existing UI reads
             "mapping_a_to": (
                 session.engine.pending_mapping or {}).get("A"),
@@ -1005,6 +1075,7 @@ def export_json():
             },
             "trials": [_trial_dict(t) for t in session.trials],
             "stats": session.stats(),
+            "validity_lines": _validity_lines(),
         }
 
     return jsonify(data), 200, {"Content-Disposition": "attachment; filename=abx_results.json"}

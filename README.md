@@ -204,6 +204,12 @@ The app uses a temporary working directory for preprocessing intermediates.
 
 See `app/main.py`.
 
+## Project State
+
+Read **[HANDOVER.md](HANDOVER.md)** first: what is verified vs unverified, the
+regression contract for bugs already fixed, environment gaps on this machine,
+and the Phase 1 plan. `DESIGN.md` describes the architecture.
+
 ## Development
 
 ```bash

@@ -132,3 +132,134 @@ def test_commitment_is_truncated_not_omitted():
     joined = "\n".join(lines)
     assert "a" * 16 + "..." in joined
     assert "a" * 64 not in joined
+
+
+# ── Phase 1: the two gates must be in the shared wording ─────────────────────
+
+
+def test_canary_lines_state_what_the_calibration_proved():
+    def line(canary):
+        lines = validity_lines(
+            null_depth_db=-8.0,
+            alignment_lag_samples=0,
+            alignment_confidence=0.99,
+            canary=canary,
+        )
+        return next(ln for ln in lines if ln.startswith("Calibration"))
+
+    assert "not configured" in line({"status": "not_configured"})
+    assert "PENDING at trial #1" in line({"status": "pending", "trial_index": 1})
+    assert "PASSED at trial #1" in line({"status": "passed", "trial_index": 1})
+    assert "FAILED at trial #1" in line({"status": "failed", "trial_index": 1})
+    assert "residual -6.31 dB" in line(
+        {"status": "passed", "trial_index": 1, "residual_text": "-6.31 dB"}
+    )
+
+
+def test_null_gate_line_states_the_measurement_and_the_floor():
+    def line(gate):
+        lines = validity_lines(
+            null_depth_db=-8.0,
+            alignment_lag_samples=0,
+            alignment_confidence=0.99,
+            null_gate=gate,
+        )
+        return next(ln for ln in lines if ln.startswith("Null gate"))
+
+    passed = line(
+        {
+            "status": "passed",
+            "measured_text": "perfect (-inf dB)",
+            "threshold_db": -60.0,
+        }
+    )
+    assert "PASSED" in passed and "-inf dB" in passed and "-60.0 dB floor" in passed
+
+    failed = line(
+        {"status": "failed", "measured_text": "-38.73 dB", "threshold_db": -60.0}
+    )
+    assert "FAILED" in failed and "-38.73 dB" in failed and "this run is void" in failed
+
+    assert "not applicable" in line({"status": "not_applicable", "threshold_db": -60.0})
+    assert "not measured" in line({"status": "not_measured"})
+
+
+def test_a_failed_gate_voids_the_verdict_line():
+    stats = {
+        "planned_trials": 16,
+        "is_final": True,
+        "required_correct": 12,
+        "ability_ci95": [0.7, 1.0],
+    }
+    text = "\n".join(
+        validity_lines(
+            null_depth_db=-38.73,
+            alignment_lag_samples=0,
+            alignment_confidence=0.99,
+            stats=stats,
+            canary={"status": "failed", "trial_index": 1},
+            null_gate={"status": "passed", "measured_text": "perfect (-inf dB)",
+                       "threshold_db": -60.0},
+        )
+    )
+    assert "Verdict: VOID at N=16" in text, "FINAL must not survive a failed gate"
+    assert "RUN VOID: calibration (canary) trial failed" in text
+
+    text_null = "\n".join(
+        validity_lines(
+            null_depth_db=-38.73,
+            alignment_lag_samples=0,
+            alignment_confidence=0.99,
+            stats=stats,
+            canary={"status": "passed", "trial_index": 1},
+            null_gate={"status": "failed", "measured_text": "-38.73 dB",
+                       "threshold_db": -60.0},
+        )
+    )
+    assert "RUN VOID: null gate failed" in text_null
+    assert "Verdict: VOID at N=16" in text_null
+
+
+def test_void_line_appears_even_without_a_registered_n():
+    text = "\n".join(
+        validity_lines(
+            null_depth_db=-3.0,
+            alignment_lag_samples=0,
+            alignment_confidence=0.9,
+            stats={"planned_trials": None, "is_final": False},
+            canary={"status": "failed", "trial_index": 1},
+        )
+    )
+    assert "not a verdict" in text
+    assert "RUN VOID" in text
+
+
+def test_gate_lines_are_absent_when_not_supplied():
+    """Callers that predate Phase 1 keep their exact previous output."""
+    lines = validity_lines(
+        null_depth_db=-19.2,
+        alignment_lag_samples=3,
+        alignment_confidence=0.9,
+        stats={"planned_trials": 16, "is_final": True, "required_correct": 12,
+               "ability_ci95": [0.5, 0.9]},
+    )
+    assert not any("Calibration" in ln for ln in lines)
+    assert not any("Null gate" in ln for ln in lines)
+    assert any("Verdict: FINAL at N=16" in ln for ln in lines)
+
+
+def test_gate_lines_honour_the_translation_hook():
+    lines = validity_lines(
+        null_depth_db=-8.0,
+        alignment_lag_samples=0,
+        alignment_confidence=0.99,
+        canary={"status": "passed", "trial_index": 1},
+        null_gate={"status": "passed", "measured_text": "perfect (-inf dB)",
+                   "threshold_db": -60.0},
+        stats={"planned_trials": 4, "is_final": True, "required_correct": 4,
+               "ability_ci95": [0.5, 1.0]},
+        t=lambda key: f"[{key}]",
+    )
+    joined = "\n".join(lines)
+    assert "[diag_canary]" in joined
+    assert "[diag_null_gate]" in joined

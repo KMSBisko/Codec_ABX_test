@@ -17,6 +17,7 @@ import json
 import math
 import os
 import random
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -49,10 +50,20 @@ from .models import (
 from core.abx import (
     LABEL_MODE_BLIND,
     LABEL_MODE_FIXED,
+    TRIAL_KIND_CANARY,
     ABXEngine as CoreABXEngine,
+    TrialGateClosed,
 )
-from core.alignment import align_pair, estimate_lag, null_depth_db
-from core.report import validity_lines
+from core.alignment import (
+    align_pair,
+    canary_audio_check,
+    estimate_lag,
+    identical_pipeline_config,
+    null_depth_db,
+    null_gate_decision,
+)
+from core.canary import degrade_for_canary
+from core.report import canary_report_block, validity_lines
 
 # ── Flask App Setup ──────────────────────────────────────────────────────────
 
@@ -88,6 +99,17 @@ class SessionState:
         self.bandwidth_limit_b_enabled: bool = False
         self.bandwidth_limit_b_hz: Optional[int] = None
         # Pre-registered trial count (fixed BEFORE the first answer)
+        # Calibration (canary) trial: trial 1, known answer, gates the session.
+        # Off by default at the API level so an existing scripted session
+        # behaves exactly as before; the web UI turns it on (it sends
+        # canary_enabled=true) because a run nobody calibrated is not citable.
+        self.canary_enabled: bool = False
+        self.canary_available: bool = True
+        self.canary_check: Dict[str, Any] = {}
+        self.canary_pristine_path: Optional[str] = None
+        self.canary_degraded_path: Optional[str] = None
+        # Null pair gate decision for the prepared pair (core.alignment)
+        self.null_gate: Dict[str, Any] = {}
         # Preprocessing
         self.preprocess_running = False
         self.preprocess_cancelled = False
@@ -124,7 +146,12 @@ class SessionState:
                 if self.label_mapping_mode == LabelMappingMode.BLIND_RANDOM
                 else LABEL_MODE_FIXED
             ),
+            # A canary whose material is not audible is a coin flip, so an
+            # unusable calibration pair disables the gate rather than voiding
+            # runs at random (and says so in the report).
+            canary_enabled=bool(self.canary_enabled and self.canary_available),
         )
+        self.engine.set_null_gate(self.null_gate or None)
         self.pending_plans.clear()
 
     def reset_trials(self):
@@ -133,7 +160,12 @@ class SessionState:
         self.configure_engine()
 
     def new_trial(self) -> Dict[str, Any]:
-        """Start a new trial. Returns the CLIENT-SAFE plan only."""
+        """Start a new trial. Returns the CLIENT-SAFE plan only.
+
+        Raises core.abx.TrialGateClosed when a validity gate is shut; the
+        endpoint turns that into a 409 so no shell can offer trials the other
+        would refuse.
+        """
         plan = self.engine.new_trial()
         self.pending_plans[plan.token] = plan
         # Keep the token table small; only the newest plans are playable.
@@ -142,20 +174,51 @@ class SessionState:
                 self.pending_plans.pop(key, None)
         return plan.public()
 
-    def resolve_x_path(self, token: Optional[str] = None) -> Optional[str]:
-        """Server-side resolution of X -> the actual audio file."""
-        plan = self.pending_plans.get(token) if token else None
+    def _plan_for(self, token: Optional[str] = None):
+        plan = self.pending_plans.get(token) if token else self.engine.pending_plan
         if plan is None:
-            # Fall back to the most recently issued plan.
             plans = list(self.pending_plans.values())
             plan = plans[-1] if plans else None
-        if plan is None:
+        return plan
+
+    def side_audio_path(
+        self, side: str, token: Optional[str] = None
+    ) -> Optional[str]:
+        """Server-side resolution of a/b/x -> an audio path.
+
+        During a calibration trial the same three names resolve to the
+        calibration pair (pristine vs grossly degraded) instead of the codec
+        pair. The client asks for "A", "B" and "X" exactly as always, so the
+        blinding is unchanged: it never learns which of the two X was.
+        """
+        plan = self._plan_for(token)
+        if plan is not None and plan.kind == TRIAL_KIND_CANARY:
+            if side == "a":
+                return self.canary_pristine_path
+            if side == "b":
+                return self.canary_degraded_path
+            if side == "x":
+                return (
+                    self.canary_pristine_path
+                    if plan.x_source == "A"
+                    else self.canary_degraded_path
+                )
             return None
-        return (
-            self.audio_a_path
-            if plan.x_source == "A"
-            else self.audio_b_path
-        )
+
+        if side == "a":
+            return self.audio_a_path
+        if side == "b":
+            return self.audio_b_path
+        if side == "x":
+            if plan is None:
+                return None
+            return self.audio_a_path if plan.x_source == "A" else self.audio_b_path
+        return None
+
+    def resolve_x_path(self, token: Optional[str] = None) -> Optional[str]:
+        """Server-side resolution of X -> the actual audio file."""
+        return self.side_audio_path("x", token)
+
 
     def submit_answer(self, answer_display: str) -> TrialResult:
         """Score an answer given as a DISPLAY label.
@@ -178,6 +241,9 @@ class SessionState:
             x_source=trial.x_source,
             answer_source=trial.answer_source,
             mapping_changed_for_next_trial=None,
+            # "canary" for the calibration trial: the UI says so, and the row
+            # is never counted in the statistics.
+            kind=trial.kind,
         )
 
     def stats(self) -> Dict[str, Any]:
@@ -306,6 +372,10 @@ def set_config():
         if lm_mode:
             session.label_mapping_mode = LabelMappingMode(lm_mode)
 
+        # Calibration (canary) trial gate.
+        if "canary_enabled" in data:
+            session.canary_enabled = bool(data.get("canary_enabled"))
+
         # Pipeline stages A
         stages_a_data = data.get("stages_a", [])
         session.stages_a = [
@@ -340,6 +410,9 @@ def get_config():
         return jsonify({
             "sample_rate_mode": session.sample_rate_mode.value,
             "label_mapping_mode": session.label_mapping_mode.value,
+            "planned_trials": session.planned_trials,
+            "canary_enabled": bool(session.canary_enabled),
+            "canary_available": bool(session.canary_available),
             "stages_a": [
                 {"codec_id": s.codec_id, "bitrate_kbps": s.bitrate_kbps}
                 for s in session.stages_a
@@ -374,6 +447,14 @@ def start_preprocess():
         session.preprocess_message = "Starting preprocessing..."
         session.preprocess_ready = False
         session.preprocess_error = None
+        # A new pair invalidates the old gates: the null decision describes the
+        # pair, and a stale decision must not gate a different pair.
+        session.null_gate = {}
+        session.canary_check = {}
+        session.canary_available = True
+        session.canary_pristine_path = None
+        session.canary_degraded_path = None
+        session.engine.set_null_gate(None)
 
     t = threading.Thread(target=_run_preprocess, daemon=True)
     t.start()
@@ -556,7 +637,6 @@ def _run_preprocess():
         if _is_cancelled():
             audio_a_final = os.path.join(work_dir, "a_final.wav")
             # Copy last stage output as final
-            import shutil
             src = session.stages_b[-1] if session.stages_b else None
             # Just use the pipeline output we already have
             pass
@@ -666,11 +746,84 @@ def _run_preprocess():
         if abs(dur_a - dur_b) > 0.01:
             validation_notes.append(f"Duration mismatch: A={dur_a:.3f}s, B={dur_b:.3f}s")
 
+        # ── Phase 9: validity gates ─────────────────────────────────────────
+        # Two measurements decide whether trials may start at all. Both are
+        # computed in core/ so the desktop refuses the same pairs the web does.
+        _set_phase("gates", 97, "Checking validity gates...")
+
+        # (a) Null gate: a pair built from identical pipelines has to null.
+        expected_identical = identical_pipeline_config(
+            stages_a_results,
+            stages_b_results,
+            bandwidth_a=(
+                session.bandwidth_limit_a_enabled,
+                session.bandwidth_limit_a_hz,
+            ),
+            bandwidth_b=(
+                session.bandwidth_limit_b_enabled,
+                session.bandwidth_limit_b_hz,
+            ),
+        )
+        null_gate = null_gate_decision(
+            null_depth_db=null_depth_final,
+            expected_identical=expected_identical,
+        )
+        if null_gate["status"] == "failed":
+            validation_notes.append(null_gate["reason"])
+
+        # (b) Calibration (canary) pair: the delivered Side A against the same
+        # material band-limited and hard clipped. Easy by construction.
+        # The pristine side is served as a byte copy of the delivered Side A, so
+        # the reference the listener hears IS Side A; the audibility measurement
+        # uses the same mono render every other web measurement uses.
+        canary_check: Dict[str, Any] = {
+            "status": "not_configured",
+            "usable": False,
+            "reason": "calibration trial not requested for this session",
+        }
+        canary_pristine_path: Optional[str] = None
+        canary_degraded_path: Optional[str] = None
+        if session.canary_enabled:
+            pristine_arr = load_wav_float(audio_a_norm)
+            degraded_arr = degrade_for_canary(pristine_arr, target_sr)
+            canary_check = canary_audio_check(
+                pristine=pristine_arr, degraded=degraded_arr
+            )
+            if canary_check.get("usable"):
+                canary_pristine_path = os.path.join(work_dir, "canary_pristine.wav")
+                canary_degraded_path = os.path.join(work_dir, "canary_degraded.wav")
+                shutil.copyfile(audio_a_norm, canary_pristine_path)
+                save_wav_float(
+                    canary_degraded_path,
+                    np.asarray(degraded_arr, dtype=np.float32),
+                    target_sr,
+                )
+                canary_check["pristine_path"] = canary_pristine_path
+                canary_check["degraded_path"] = canary_degraded_path
+            else:
+                # A coin-flip calibration is worse than none: it voids valid
+                # runs at random, so refuse the gate and say why.
+                validation_notes.append(
+                    f"calibration trial disabled: {canary_check['reason']}"
+                )
+
         # Store session metadata
         with session.lock:
             session.audio_a_path = audio_a_norm
             session.audio_b_path = audio_b_norm
             session.preprocess_ready = True
+            session.null_gate = null_gate
+            session.canary_check = canary_check
+            session.canary_pristine_path = canary_pristine_path
+            session.canary_degraded_path = canary_degraded_path
+            session.canary_available = bool(
+                (not session.canary_enabled) or canary_check.get("usable", False)
+            )
+            # The engine is rebuilt from the new pair: the null gate now guards
+            # /api/trial/start, and an unusable calibration pair turns the
+            # canary off. New audio means a new session, so old trials do not
+            # survive it.
+            session.configure_engine()
             session.session_metadata = {
                 "input_file": session.input_file_name or "",
                 "original_sample_rate": original_sr,
@@ -703,6 +856,14 @@ def _run_preprocess():
                 "validation_notes": validation_notes,
                 "stages_a_details": stages_a_results,
                 "stages_b_details": stages_b_results,
+                # Phase 1 gates: the two measurements that decide whether this
+                # session was allowed to run, in the export, not just the UI.
+                "expected_identical_pair": expected_identical,
+                "null_gate": null_gate,
+                "canary_requested": bool(session.canary_enabled),
+                "canary_available": bool(session.canary_available),
+                "canary": canary_check,
+                "canary_trial_index": 1 if session.canary_enabled else None,
             }
 
         _set_phase("complete", 100, "Preprocessing complete!")
@@ -830,19 +991,17 @@ def stream_audio(side: str):
 
     'x' is resolved SERVER-SIDE from the trial token. The client asks for
     "the X audio" and receives bytes; it never learns which side that was.
+
+    During a calibration (canary) trial the same three names resolve to the
+    calibration pair (pristine / degraded / coin-selected) -- the client's
+    request and the blinding are unchanged.
     """
     with session.lock:
-        if side == "a":
-            path = session.audio_a_path
-        elif side == "b":
-            path = session.audio_b_path
-        elif side == "x":
-            path = session.resolve_x_path(
-                request.args.get("token", type=str)
-            )
-        else:
+        if side not in ("a", "b", "x"):
             return jsonify({"error": "side must be 'a', 'b' or 'x'"}), 400
-
+        path = session.side_audio_path(
+            side, request.args.get("token", type=str)
+        )
         if not path or not Path(path).exists():
             return jsonify({"error": f"audio {side} not found"}), 404
 
@@ -862,15 +1021,11 @@ def stream_audio_segment(side: str):
     end = request.args.get("end", type=float, default=None)
 
     with session.lock:
-        if side == "a":
-            path = session.audio_a_path
-        elif side == "b":
-            path = session.audio_b_path
-        elif side == "x":
-            path = session.resolve_x_path(request.args.get("token", type=str))
-        else:
+        if side not in ("a", "b", "x"):
             return jsonify({"error": "side must be 'a', 'b' or 'x'"}), 400
-
+        path = session.side_audio_path(
+            side, request.args.get("token", type=str)
+        )
         if not path or not Path(path).exists():
             return jsonify({"error": f"audio {side} not found"}), 404
 
@@ -934,6 +1089,11 @@ def audio_info():
 
 # ── API: ABX Trials ──────────────────────────────────────────────────────────
 
+def _canary_block() -> Dict[str, Any]:
+    """Engine's canary state + the measured calibration material (core.report)."""
+    return canary_report_block(session.engine.gates()["canary"], session.canary_check)
+
+
 def _validity_lines() -> List[str]:
     """Same evidence block as the desktop panel, same wording (core.report)."""
     meta = session.session_metadata or {}
@@ -967,11 +1127,18 @@ def _validity_lines() -> List[str]:
             "ability_ci95": stats["ability_ci95"],
         },
         commitment=session.engine.session_commitment,
+        canary=_canary_block(),
+        null_gate=session.engine.null_gate_block(),
     )
 
 
 def _trial_dict(trial) -> Dict[str, Any]:
-    """core.abx Trial -> the legacy dict shape the UI/export already expects."""
+    """core.abx Trial -> the legacy dict shape the UI/export already expects.
+
+    `kind` separates the calibration trial from the scored ones: the canary is
+    exported (it is part of the committed sequence and of the validity
+    evidence) but it is never counted in the statistics.
+    """
     return {
         "trial_index": trial.trial_index,
         "x_is": trial.x_source,
@@ -983,14 +1150,28 @@ def _trial_dict(trial) -> Dict[str, Any]:
         "x_source": trial.x_source,
         "answer_source": trial.answer_source,
         "mapping_changed_for_next_trial": None,
+        "kind": trial.kind,
     }
 
 
 @app.route("/api/trial/start", methods=["POST"])
 def start_trial():
-    """Start a new ABX trial."""
+    """Start a new ABX trial.
+
+    409 while a validity gate is shut: a session that failed its calibration
+    trial, or a pair that should null and does not, cannot be offered trials.
+    The engine (not this route) owns that decision, so the desktop and the web
+    refuse identically.
+    """
     with session.lock:
-        info = session.new_trial()
+        try:
+            info = session.new_trial()
+        except TrialGateClosed as exc:
+            return jsonify({
+                "error": str(exc),
+                "reasons": list(exc.reasons),
+                "gates": session.engine.gates(),
+            }), 409
     return jsonify(info)
 
 
@@ -1008,6 +1189,8 @@ def submit_answer():
             return jsonify({"error": str(e)}), 400
 
     return jsonify({
+        # Legacy row shape plus `kind`: the answer feedback names the trial as
+        # calibration when it was one, and the run's void state is in `stats`.
         "trial": trial_result_to_dict(trial),
         "stats": session.stats(),
     })
@@ -1030,10 +1213,10 @@ def reset_trials():
 
 @app.route("/api/trials", methods=["GET"])
 def get_trials():
-    """Return all trial results."""
+    """Return all trials (calibration included, flagged by `kind`)."""
     with session.lock:
         return jsonify({
-            "trials": [_trial_dict(t) for t in session.trials],
+            "trials": [_trial_dict(t) for t in session.engine.all_trials()],
             "stats": session.stats(),
         })
 
@@ -1044,12 +1227,20 @@ def get_trials():
 def get_diagnostics():
     """Return full diagnostics data."""
     with session.lock:
+        gates = session.engine.gates()
         return jsonify({
             "metadata": session.session_metadata,
-            "trials": [_trial_dict(t) for t in session.trials],
+            "trials": [_trial_dict(t) for t in session.engine.all_trials()],
             "stats": session.stats(),
             "display_mapping": session.engine.pending_mapping,
             "validity_lines": _validity_lines(),
+            # Phase 1 gates: the desktop panel, this payload and the JSON
+            # export all read the same blocks from core.
+            "canary": _canary_block(),
+            "null_gate": session.engine.null_gate_block(),
+            "gates": gates,
+            "run_valid": session.engine.run_valid,
+            "current_trial_kind": session.engine.current_trial_kind,
             # legacy keys the existing UI reads
             "mapping_a_to": (
                 session.engine.pending_mapping or {}).get("A"),
@@ -1064,6 +1255,7 @@ def get_diagnostics():
 def export_json():
     """Export results as JSON file."""
     with session.lock:
+        gates = session.engine.gates()
         data = {
             "exported_at_utc": datetime.now(timezone.utc).isoformat(),
             "session": {
@@ -1072,8 +1264,14 @@ def export_json():
                 "tool": "codec-abx-tester/web",
                 "disclosure": session.session_metadata.get("disclosure", {}),
                 "verifiability": session.engine.reveal(),
+                "canary": _canary_block(),
+                "null_gate": session.engine.null_gate_block(),
+                "gates": gates,
+                "run_valid": session.engine.run_valid,
             },
-            "trials": [_trial_dict(t) for t in session.trials],
+            # Calibration included: it is part of the committed X sequence, so
+            # a third party verifying this file sees the same indices.
+            "trials": [_trial_dict(t) for t in session.engine.all_trials()],
             "stats": session.stats(),
             "validity_lines": _validity_lines(),
         }
@@ -1083,20 +1281,29 @@ def export_json():
 
 @app.route("/api/export/csv", methods=["GET"])
 def export_csv():
-    """Export trial results as CSV file."""
+    """Export trial results as CSV file.
+
+    The rows go through `_trial_dict`, and the header is derived from its keys.
+    The previous version passed `asdict(core.Trial)` to a hardcoded 9-column
+    header, which raised `dict contains fields not in fieldnames` on every
+    export (same class of bug as the desktop CSV crash Phase 0 fixed).
+    """
     with session.lock:
-        output = io.StringIO()
-        writer = csv.DictWriter(
-            output,
-            fieldnames=[
-                "trial_index", "x_is", "answer", "correct", "timestamp_utc",
-                "mapping_a_to", "mapping_b_to", "x_source", "answer_source",
-            ],
-        )
-        writer.writeheader()
-        for trial in session.trials:
-            from dataclasses import asdict
-            writer.writerow(asdict(trial))
+        rows = [_trial_dict(t) for t in session.engine.all_trials()]
+
+    # Header derived from the row shape, with a fixed fallback so an empty
+    # session still exports a readable header.
+    fieldnames = list(rows[0].keys()) if rows else [
+        "trial_index", "x_is", "answer", "correct", "timestamp_utc",
+        "mapping_a_to", "mapping_b_to", "x_source", "answer_source",
+        "mapping_changed_for_next_trial", "kind",
+    ]
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({name: ("" if row.get(name) is None else row.get(name))
+                         for name in fieldnames})
 
     csv_data = output.getvalue().encode("utf-8")
     return send_file(
@@ -1111,13 +1318,20 @@ def export_csv():
 
 @app.route("/api/session/info", methods=["GET"])
 def session_info():
-    """Return basic session information."""
+    """Return basic session information, including the state of both gates."""
     with session.lock:
+        gates = session.engine.gates()
         return jsonify({
             "has_input": session.input_file_path is not None,
             "input_filename": session.input_file_name,
             "preprocess_ready": session.preprocess_ready,
             "label_mapping_mode": session.label_mapping_mode.value,
+            "canary_requested": bool(session.canary_enabled),
+            "canary_available": bool(session.canary_available),
+            "canary": _canary_block(),
+            "null_gate": session.engine.null_gate_block(),
+            "gates_open": gates["open"],
+            "run_valid": session.engine.run_valid,
         })
 
 

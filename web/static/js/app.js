@@ -38,6 +38,13 @@ const state = {
     xToken: null,
     bufferX: null,
     statsMeta: {},
+    // Phase 1 validity gates. `currentTrialKind` is reported by the server
+    // ("canary" for the calibration trial): it decides which audio A/B resolve
+    // to, so buffer sharing has to be suspended for that trial.
+    currentTrialKind: "normal",
+    canaryTrial: false,
+    buffersIdenticalFromServer: false,
+    gates: null,
     // Auto-advance: keep audio playing after answer and auto-start next trial
     autoAdvanceEnabled: true,
     // Scrub state tracking — prevents animation from fighting user drag
@@ -84,6 +91,29 @@ const translations = {
         total_trials_label: "Total Trials:",
         correct_label: "Correct:",
         p_value_label: "One-tailed p-value:",
+        canary_stat_label: "Calibration:",
+        null_gate_stat_label: "Null gate:",
+        verdict_label: "Verdict:",
+        canary_label: "Calibration trial (canary) gates this session",
+        canary_hint: "Trial 1 has a known answer and is deliberately easy: X is the clean sample against a grossly degraded one. Miss it and the whole run is void, because a silent or mis-routed output is not a hearing result. It is recorded and never counted in the statistics.",
+        canary_badge: "CALIBRATION TRIAL — known answer, deliberately easy, not counted in the statistics",
+        canary_not_configured: "not configured",
+        canary_pending: "pending (trial 1)",
+        canary_passed: "PASSED",
+        canary_failed: "FAILED — run void",
+        canary_unavailable: "unavailable (material not audible)",
+        null_gate_passed: "passed",
+        null_gate_failed: "FAILED — run void",
+        null_gate_not_applicable: "not applicable (pair is meant to differ)",
+        null_gate_not_measured: "not measured",
+        verdict_void: "VOID — a validity gate failed",
+        verdict_final: "FINAL",
+        verdict_provisional: "provisional",
+        verdict_none: "no registered N",
+        gate_banner_void: "This run is VOID: ",
+        gate_banner_blocked: "Trials are blocked: ",
+        canary_feedback_pass: "✓ Calibration passed — your chain works. ",
+        canary_feedback_fail: "✕ Calibration FAILED — the run is void. Check the output device and volume, then start a new session. ",
         export_json_btn: "Export JSON",
         export_csv_btn: "Export CSV",
         diagnostics_title: "Diagnostics",
@@ -124,6 +154,29 @@ const translations = {
         total_trials_label: "Tổng số lần thử:",
         correct_label: "Đúng:",
         p_value_label: "Giá trị p một phía:",
+        canary_stat_label: "Hiệu chuẩn:",
+        null_gate_stat_label: "Cổng null:",
+        verdict_label: "Kết luận:",
+        canary_label: "Lượt hiệu chuẩn (canary) kiểm soát phiên này",
+        canary_hint: "Lượt 1 có đáp án đã biết và cố ý rất dễ: X là bản gốc so với bản bị huỷ hoại nặng. Nếu trả lời sai, toàn bộ phiên bị vô hiệu, vì một cặp A/B không thể phân biệt không phải là kết quả thính giác. Lượt này được ghi nhận và không tính vào thống kê.",
+        canary_badge: "LƯỢT HIỆU CHUẨN — đáp án đã biết, cố ý rất dễ, không tính vào thống kê",
+        canary_not_configured: "chưa cấu hình",
+        canary_pending: "chờ (lượt 1)",
+        canary_passed: "ĐẠT",
+        canary_failed: "TRƯỢT — phiên bị vô hiệu",
+        canary_unavailable: "không dùng được (vật liệu không nghe thấy)",
+        null_gate_passed: "đạt",
+        null_gate_failed: "TRƯỢT — phiên bị vô hiệu",
+        null_gate_not_applicable: "không áp dụng (cặp A/B cố ý khác nhau)",
+        null_gate_not_measured: "chưa đo",
+        verdict_void: "VÔ HIỆU — một cổng kiểm định đã trượt",
+        verdict_final: "CHỐT",
+        verdict_provisional: "tạm thời",
+        verdict_none: "chưa đăng ký N",
+        gate_banner_void: "Phiên này VÔ HIỆU: ",
+        gate_banner_blocked: "Không được bắt đầu lượt thử: ",
+        canary_feedback_pass: "✓ Hiệu chuẩn đạt — chuỗi phát của bạn hoạt động tốt. ",
+        canary_feedback_fail: "✕ Hiệu chuẩn TRƯỢT — phiên bị vô hiệu. Hãy kiểm tra thiết bị phát và âm lượng, rồi bắt đầu phiên mới. ",
         export_json_btn: "Xuất JSON",
         export_csv_btn: "Xuất CSV",
         diagnostics_title: "Chẩn đoán",
@@ -186,7 +239,12 @@ async function api(url, options = {}) {
     });
     if (resp.ok) return resp.json();
     const err = await resp.json().catch(() => ({ error: resp.statusText }));
-    throw new Error(err.error || `HTTP ${resp.status}`);
+    // Keep the message for callers that only log it, and carry the payload:
+    // a 409 from a closed validity gate ships the reasons and the gate state.
+    const e = new Error(err.error || `HTTP ${resp.status}`);
+    e.status = resp.status;
+    e.payload = err;
+    throw e;
 }
 
 // ── Initialization ───────────────────────────────────────────────
@@ -389,6 +447,11 @@ async function startPreprocess() {
             const n = parseInt(el.value, 10);
             return Number.isFinite(n) && n > 0 ? n : null;
         })(),
+        // Calibration (canary) gate: trial 1, known answer, gates the session.
+        canary_enabled: (function () {
+            const el = document.getElementById("canaryEnabled");
+            return el ? el.checked : false;
+        })(),
     };
 
     try {
@@ -555,7 +618,11 @@ async function loadAudioInfo() {
 
         // Check if A and B are identical (same codec config, noop passthrough, etc.)
         // If so, share a single buffer for zero-perception difference
-        state.buffersIdentical = info.buffers_identical || false;
+        state.buffersIdenticalFromServer = info.buffers_identical || false;
+        // Never share during a calibration trial: A and B are the pristine
+        // and the deliberately degraded sample, the opposite of identical.
+        state.buffersIdentical =
+            !state.canaryTrial && state.buffersIdenticalFromServer;
         if (state.buffersIdentical && state.bufferA) {
             // Use the same buffer reference for both sides
             state.bufferB = state.bufferA;
@@ -1055,6 +1122,14 @@ async function startNewTrial() {
         const stats = await api("/api/trial/stats");
         state.totalTrials = stats.total_trials;
         state.correctTrials = stats.correct_trials;
+        state.gates = stats.gates || null;
+        state.currentTrialKind = stats.current_trial_kind || "normal";
+
+        // A calibration trial plays a DIFFERENT pair of files (the pristine
+        // sample and its deliberately degraded copy). Entering or leaving
+        // that mode refetches A and B; the client asks for "A" and "B" the
+        // same way in both modes and never learns which is which.
+        await setCanaryMode(state.currentTrialKind === "canary");
 
         // The plan carries a token, not an answer. Refetch X audio so the
         // play button emits this trial's X.
@@ -1066,12 +1141,61 @@ async function startNewTrial() {
         }
 
         updateStatsDisplay();
+        clearGateBanner();
 
         // Hide feedback from previous trial
         document.getElementById("trialFeedback").classList.add("hidden");
     } catch (e) {
+        if (e.status === 409) {
+            // A validity gate is shut. The engine owns that decision; show the
+            // reasons it gave and stop, so nobody answers trials of a void run.
+            showGateBanner(e.payload);
+            updateStatsDisplay();
+        }
         console.error("Trial start error:", e);
     }
+}
+
+/**
+ * Enter/leave calibration-trial mode: badge, buffer sharing, A/B refetch.
+ */
+async function setCanaryMode(on) {
+    const changed = state.canaryTrial !== on;
+    state.canaryTrial = on;
+    const badge = document.getElementById("canaryBadge");
+    if (badge) badge.classList.toggle("hidden", !on);
+
+    state.buffersIdentical = on ? false : Boolean(state.buffersIdenticalFromServer);
+    if (!changed) {
+        if (state.buffersIdentical && state.bufferA) state.bufferB = state.bufferA;
+        return;
+    }
+
+    state.bufferA = null;
+    state.bufferB = null;
+    try {
+        await Promise.all([preloadBuffer("a"), preloadBuffer("b")]);
+    } catch (e) {
+        console.error("A/B buffer reload failed:", e);
+    }
+    if (state.buffersIdentical && state.bufferA) state.bufferB = state.bufferA;
+}
+
+function showGateBanner(payload) {
+    const el = document.getElementById("gateBanner");
+    const text = document.getElementById("gateBannerText");
+    if (!el || !text) return;
+    const reasons = (payload && payload.reasons) || [];
+    text.textContent =
+        (reasons.length
+            ? t("gate_banner_blocked") + reasons.join("; ")
+            : t("gate_banner_void") + ((payload && payload.error) || ""));
+    el.classList.remove("hidden");
+}
+
+function clearGateBanner() {
+    const el = document.getElementById("gateBanner");
+    if (el) el.classList.add("hidden");
 }
 
 async function submitAnswer(answer) {
@@ -1126,18 +1250,33 @@ async function submitAnswer(answer) {
             // This avoids the flash: feedback is hidden → shown in one smooth transition
             await startNewTrial();
             // Now show the feedback for the trial that was just answered
-            textEl.textContent = trial.correct ? `✓ Correct! (X was ${trial.x_is})` : `✕ Incorrect. (X was ${trial.x_is})`;
+            textEl.textContent = feedbackTextFor(trial);
             textEl.className = trial.correct ? "correct" : "incorrect";
             feedbackEl.classList.remove("hidden");
         } else {
             // No auto-advance: show feedback immediately
-            textEl.textContent = trial.correct ? `✓ Correct! (X was ${trial.x_is})` : `✕ Incorrect. (X was ${trial.x_is})`;
+            textEl.textContent = feedbackTextFor(trial);
             textEl.className = trial.correct ? "correct" : "incorrect";
             feedbackEl.classList.remove("hidden");
         }
     } catch (e) {
         alert(`Answer error: ${e.message}`);
     }
+}
+
+/**
+ * Answer feedback. The calibration trial gets its own wording: a miss there is
+ * a broken chain, not a hearing result, and the run is void.
+ */
+function feedbackTextFor(trial) {
+    const plain = trial.correct
+        ? `✓ Correct! (X was ${trial.x_is})`
+        : `✕ Incorrect. (X was ${trial.x_is})`;
+    if (trial.kind === "canary") {
+        return (trial.correct ? t("canary_feedback_pass") : t("canary_feedback_fail"))
+            + plain;
+    }
+    return plain;
 }
 
 function nextTrial() {
@@ -1165,6 +1304,7 @@ function updateStatsDisplay() {
     // Fetch p-value from server
     api("/api/trial/stats").then(s => {
         state.statsMeta = s;
+        state.gates = s.gates || null;
         const el = document.getElementById("statPValue");
         const p = s.p_value_one_tailed.toFixed(5);
         if (!s.planned_trials) {
@@ -1178,10 +1318,63 @@ function updateStatsDisplay() {
             el.textContent = `${p} (provisional, >=${s.required_correct}/${s.planned_trials})`;
             el.title = t("verdict_provisional_tooltip");
         }
+        renderGates(s);
     });
 
     document.getElementById("trialCounter").textContent = t("trial_counter", stats.totalTrials + 1, stats.correctTrials);
     document.getElementById("scoreDisplay").textContent = t("score_display", stats.correctTrials, stats.totalTrials);
+}
+
+/**
+ * Show the two validity gates next to the p-value.
+ *
+ * The numbers are the server's (core.abx), never computed here: the desktop
+ * panel, this table and the JSON export must not be able to disagree.
+ */
+function renderGates(s) {
+    const canaryEl = document.getElementById("statCanary");
+    const nullEl = document.getElementById("statNullGate");
+    const verdictEl = document.getElementById("statVerdict");
+    if (!canaryEl || !nullEl || !verdictEl) return;
+
+    const canary = s.canary || {};
+    const nullGate = s.null_gate || {};
+    const canaryKeys = {
+        not_configured: "canary_not_configured",
+        pending: "canary_pending",
+        passed: "canary_passed",
+        failed: "canary_failed",
+        unavailable: "canary_unavailable",
+    };
+    const nullKeys = {
+        not_measured: "null_gate_not_measured",
+        not_applicable: "null_gate_not_applicable",
+        pending: "null_gate_not_measured",
+        passed: "null_gate_passed",
+        failed: "null_gate_failed",
+    };
+    const withIndex = (label, block) =>
+        block.trial_index ? `${label} (#${block.trial_index})` : label;
+
+    canaryEl.textContent = withIndex(
+        t(canaryKeys[canary.status] || "canary_not_configured"), canary);
+    canaryEl.title = canary.reason || "";
+    nullEl.textContent = t(nullKeys[nullGate.status] || "null_gate_not_measured");
+    nullEl.title = nullGate.reason || "";
+
+    if (s.void) {
+        verdictEl.textContent = t("verdict_void");
+        verdictEl.className = "incorrect";
+    } else {
+        verdictEl.className = "";
+        verdictEl.textContent = s.is_final
+            ? `${t("verdict_final")} (N=${s.planned_trials})`
+            : (s.planned_trials ? t("verdict_provisional") : t("verdict_none"));
+    }
+
+    // A void run is stated on the panel, not only inside the export.
+    const reasons = (s.gates && s.gates.reasons) || [];
+    if (s.void && reasons.length) showGateBanner({ reasons });
 }
 
 // ── Export Functions ─────────────────────────────────────────────

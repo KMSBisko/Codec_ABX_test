@@ -135,6 +135,10 @@ class TrialResult:
     x_source: Optional[str] = None
     answer_source: Optional[str] = None
     mapping_changed_for_next_trial: Optional[bool] = None
+    # core.abx.TRIAL_KIND_NORMAL / TRIAL_KIND_CANARY. The calibration trial is
+    # exported and shown, but the statistics never count it; anything reading
+    # these rows needs the flag to tell the two apart.
+    kind: str = "normal"
 
 
 # ── Preprocess Status (for streaming progress) ───────────────────────────────

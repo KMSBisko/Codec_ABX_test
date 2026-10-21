@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .abx_engine import ABXEngine
-from .core_report_shim import validity_lines
+from .core_report_shim import canary_report_block, validity_lines
 from .audio_pipeline import AudioPipeline, PipelineCancelled, PipelineError
 from .logger import ExperimentLogger
 from .models import PipelineStageConfig, ProcessingMode, SampleRateMode, TrialResult, codec_catalog
@@ -151,6 +151,39 @@ TRANSLATIONS = {
         "diag_resample_engine": "Resample engine",
         "diag_validity_block": "── Test validity evidence ──",
         "diag_null_depth": "Null depth (A-B residual)",
+        "diag_null_gate": "Null gate (identical-pair check)",
+        "diag_canary": "Calibration (canary) trial",
+        "diag_run_void": "RUN VOID",
+        "canary_enable": "Calibration trial (canary) gates this session",
+        "canary_tooltip": (
+            "Trial 1 is a deliberately-easy trial with a known answer: X is "
+            "the clean sample against a grossly degraded one. Miss it and the "
+            "whole run is void, because your playback chain or your attention "
+            "is not working. It is recorded, never counted in the statistics."
+        ),
+        "canary_status": "Calibration",
+        "canary_pending": "Calibration: trial 1 - answer it before scored trials",
+        "canary_passed": "Calibration: PASSED - playback chain confirmed",
+        "canary_failed": "Calibration: FAILED - RUN VOID, reset the session",
+        "canary_unavailable": "Calibration: unavailable - material not audible",
+        "canary_not_configured": "Calibration: not configured for this session",
+        "planned_n_locked": (
+            "Planned N is locked once the first answer is in: changing the "
+            "pass criterion after seeing data is p-hacking. Reset the trials "
+            "to re-register N."
+        ),
+        "canary_trial_badge": "CALIBRATION TRIAL (known answer, not scored)",
+        "canary_applies_next_session": (
+            "Calibration setting applies to the next session: this one already "
+            "has trials recorded."
+        ),
+        "gate_blocked_title": "Trials are gated",
+        "gate_blocked_text": (
+            "This session is void before any trial counts:\n\n{reasons}\n\n"
+            "Fix the pipeline (alignment/level) or reset the session and pass "
+            "the calibration trial."
+        ),
+        "null_gate_failed_title": "Null gate failed",
         "diag_alignment": "Alignment",
         "diag_loudness_pre": "Loudness delta BEFORE normalization",
         "diag_loudness_residual": "Loudness residual after matching",
@@ -292,6 +325,40 @@ TRANSLATIONS = {
         "diag_resample_engine": "Engine resample",
         "diag_validity_block": "── Bằng chứng tính hợp lệ của phép thử ──",
         "diag_null_depth": "Độ sâu null (phần dư A-B)",
+        "diag_null_gate": "Cổng null (kiểm tra cặp giống hệt nhau)",
+        "diag_canary": "Lượt hiệu chuẩn (canary)",
+        "diag_run_void": "LƯỢT CHẠY BỊ HỦY",
+        "canary_enable": "Lượt hiệu chuẩn (canary) chặn phiên này",
+        "canary_tooltip": (
+            "Lượt 1 là lượt cố tình rất dễ và đáp án đã biết: X là bản sạch "
+            "so với bản bị làm hỏng rõ rệt. Nếu trả lời sai, toàn bộ lượt chạy "
+            "bị hủy, vì chuỗi phát hoặc sự tập trung của bạn đang không hoạt "
+            "động. Lượt này được ghi lại, không tính vào thống kê."
+        ),
+        "canary_status": "Hiệu chuẩn",
+        "canary_pending": "Hiệu chuẩn: lượt 1 - hãy trả lời trước các lượt tính điểm",
+        "canary_passed": "Hiệu chuẩn: ĐẠT - chuỗi phát đã được xác nhận",
+        "canary_failed": "Hiệu chuẩn: KHÔNG ĐẠT - LƯỢT CHẠY BỊ HỦY, hãy đặt lại phiên",
+        "canary_unavailable": "Hiệu chuẩn: không khả dụng - vật liệu không nghe được",
+        "canary_not_configured": "Hiệu chuẩn: chưa được cấu hình cho phiên này",
+        "planned_n_locked": (
+            "N dự kiến bị khoá sau lượt trả lời đầu tiên: đổi tiêu chuẩn đạt "
+            "sau khi đã thấy dữ liệu là p-hacking. Hãy đặt lại các lượt thử để "
+            "đăng ký N lại."
+        ),
+        "canary_trial_badge": "LƯỢT HIỆU CHUẨN (đáp án đã biết, không tính điểm)",
+        "canary_applies_next_session": (
+            "Cài đặt hiệu chuẩn áp dụng cho phiên kế tiếp: phiên này đã có lượt "
+            "thử được ghi nhận."
+        ),
+        "gate_blocked_title": "Lượt thử bị chặn",
+        "gate_blocked_text": (
+            "Phiên này bị hủy trước khi bất kỳ lượt thử nào được tính:\n\n"
+            "{reasons}\n\n"
+            "Hãy sửa đường ống (căn chỉnh/mức lượng) hoặc đặt lại phiên và vượt "
+            "qua lượt hiệu chuẩn."
+        ),
+        "null_gate_failed_title": "Cổng null thất bại",
         "diag_alignment": "Căn chỉnh",
         "diag_loudness_pre": "Chênh lệch loudness TRƯỚC chuẩn hóa",
         "diag_loudness_residual": "Phần dư loudness sau căn bằng",
@@ -353,6 +420,7 @@ class PrepareWorker(QObject):
         bandwidth_limit_a_hz: Optional[int],
         bandwidth_limit_b_enabled: bool,
         bandwidth_limit_b_hz: Optional[int],
+        canary_enabled: bool = False,
     ) -> None:
         super().__init__()
         self.pipeline = pipeline
@@ -369,6 +437,7 @@ class PrepareWorker(QObject):
         self.bandwidth_limit_a_hz = bandwidth_limit_a_hz
         self.bandwidth_limit_b_enabled = bandwidth_limit_b_enabled
         self.bandwidth_limit_b_hz = bandwidth_limit_b_hz
+        self.canary_enabled = canary_enabled
 
     def run(self) -> None:
         try:
@@ -386,6 +455,10 @@ class PrepareWorker(QObject):
                 bandwidth_limit_a_hz=self.bandwidth_limit_a_hz,
                 bandwidth_limit_b_enabled=self.bandwidth_limit_b_enabled,
                 bandwidth_limit_b_hz=self.bandwidth_limit_b_hz,
+                # Phase 1 gate: build + measure the calibration pair during
+                # preparation, so a session that cannot be calibrated says so
+                # before any trial is offered.
+                canary_enabled=self.canary_enabled,
             )
             self.finished.emit(prepared, arr_a, arr_b)
         except PipelineCancelled:
@@ -409,6 +482,11 @@ class MainWindow(QMainWindow):
 
         self.pipeline = AudioPipeline()
         self.player = SynchronizedABXPlayer()
+        # Phase 1: the player has one A/B slot. It serves the codec pair, and
+        # swaps to the calibration (canary) pair while a calibration trial is
+        # staged. `_codec_buffers` is the codec pair to swap back to.
+        self._player_canary_mode = False
+        self._codec_buffers: Optional[tuple] = None
         self.engine = self._make_engine()
         self.logger = ExperimentLogger()
 
@@ -1206,7 +1284,12 @@ class MainWindow(QMainWindow):
         self.answer_a.setText(self._t("x_eq_a"))
         self.answer_b.setText(self._t("x_eq_b"))
         self.cancel_session_btn.setText(self._t("cancel_abx"))
+        self.planned_trials_label.setText(self._t("planned_n"))
+        self.planned_trials_spin.setToolTip(self._t("planned_n_tooltip"))
+        self.canary_check.setText(self._t("canary_enable"))
+        self.canary_check.setToolTip(self._t("canary_tooltip"))
         self._update_score_ui()
+        self._refresh_gate_status()
 
         self.group_diag.setTitle(self._t("group_diag"))
         self.diagnostics_view.setPlaceholderText(self._t("diag_placeholder"))
@@ -1600,6 +1683,19 @@ class MainWindow(QMainWindow):
         self.planned_trials_spin.valueChanged.connect(self._on_planned_trials_changed)
         self.planned_trials_label = QLabel(self._t("planned_n"))
 
+        # Calibration (canary) gate: trial 1 has a known answer - the delivered
+        # Side A against the same material band-limited and hard clipped.
+        # Missing it voids the run, because a silent or mis-routed output is not
+        # a hearing result. It is recorded and never counted.
+        self.canary_check = QCheckBox(self._t("canary_enable"))
+        self.canary_check.setChecked(True)
+        self.canary_check.setToolTip(self._t("canary_tooltip"))
+        self.canary_check.stateChanged.connect(self._on_canary_toggled)
+
+        # Gate state line: calibration status, null-gate status, VOID banner.
+        self.gate_status_label = QLabel("")
+        self.gate_status_label.setWordWrap(True)
+
         self.answer_a = QPushButton(self._t("x_eq_a"))
         self.answer_b = QPushButton(self._t("x_eq_b"))
         self.answer_a.clicked.connect(lambda: self.on_answer("A"))
@@ -1613,9 +1709,11 @@ class MainWindow(QMainWindow):
         abx_row.addWidget(self.pvalue_label, 0, 2)
         abx_row.addWidget(self.planned_trials_label, 0, 3)
         abx_row.addWidget(self.planned_trials_spin, 0, 4)
+        abx_row.addWidget(self.canary_check, 0, 5)
         abx_row.addWidget(self.answer_a, 1, 0)
         abx_row.addWidget(self.answer_b, 1, 1)
         abx_row.addWidget(self.cancel_session_btn, 1, 2)
+        abx_row.addWidget(self.gate_status_label, 2, 0, 1, 6)
         layout.addLayout(abx_row)
         return g
 
@@ -1804,6 +1902,7 @@ class MainWindow(QMainWindow):
             bandwidth_limit_a_hz=bandwidth_a_hz,
             bandwidth_limit_b_enabled=bandwidth_b_enabled,
             bandwidth_limit_b_hz=bandwidth_b_hz,
+            canary_enabled=self._canary_requested(),
         )
         self.prepare_worker.moveToThread(self.prepare_thread)
         self.prepare_thread.started.connect(self.prepare_worker.run)
@@ -1828,6 +1927,10 @@ class MainWindow(QMainWindow):
 
         self.prepared_session = prepared
         self.player.load_buffers(arr_a, arr_b, prepared.target_sample_rate)
+        # The codec pair the player slot serves by default; a calibration trial
+        # swaps it out and back (see _sync_engine_audio_mode).
+        self._codec_buffers = (arr_a, arr_b, prepared.target_sample_rate)
+        self._player_canary_mode = False
 
         mapping_mode = self._mapping_mode_pending
         self.engine = self._make_engine(mapping_mode)
@@ -1858,6 +1961,12 @@ class MainWindow(QMainWindow):
                 "validation": asdict(prepared.validation),
                 "track_a": asdict(prepared.track_a),
                 "track_b": asdict(prepared.track_b),
+                # Phase 1 gates, measured at preparation. `seal()` overwrites
+                # the canary block with its final state at export time.
+                "null_gate": prepared.null_gate,
+                "canary": canary_report_block(
+                    self.engine.gates()["canary"], prepared.canary
+                ),
             }
         )
 
@@ -1880,6 +1989,167 @@ class MainWindow(QMainWindow):
             msg += f" | {self._t('labels_blinded')}"
         self._set_status(msg)
         self._refresh_diagnostics_panel()
+
+    # ── engine construction and validity gates ──────────────────────────────
+    def _on_canary_toggled(self, _state: int) -> None:
+        """The calibration gate is a session property, not a per-trial one.
+
+        Toggling it mid-run would silently change what trial 1 means, so the
+        engine is only rebuilt while nothing has been answered; afterwards the
+        change applies to the next session and says so.
+        """
+        self._refresh_gate_status()
+        engine = getattr(self, "engine", None)
+        if engine is None:
+            return
+        status = engine.canary_block().get("status")
+        idle = engine.stats().total_trials == 0 and status in (
+            "not_configured",
+            "pending",
+        )
+        if not idle:
+            self._set_status(self._t("canary_applies_next_session"))
+            return
+        self._make_engine()
+
+    def _planned_trials_from_ui(self) -> Optional[int]:
+        """N as registered right now; None when 0 (= not registered)."""
+        spin = getattr(self, "planned_trials_spin", None)
+        if spin is None:  # the engine is built before the widgets exist
+            return None
+        n = int(spin.value())
+        return n if n > 0 else None
+
+    def _canary_requested(self) -> bool:
+        check = getattr(self, "canary_check", None)
+        if check is None:  # built before the widgets exist: match the UI default
+            return True
+        return bool(check.isChecked())
+
+    def _canary_available(self) -> bool:
+        """Whether the prepared pair produced audible calibration material."""
+        prepared = getattr(self, "prepared_session", None)
+        if prepared is None:
+            return True
+        material = getattr(prepared, "canary", None) or {}
+        return bool(material.get("usable", False))
+
+    def _make_engine(self, mapping_mode: Optional[str] = None) -> ABXEngine:
+        """Build the trial engine from the current UI and prepared session.
+
+        Referenced at three call sites and never defined in the committed tree:
+        `MainWindow.__init__` raised AttributeError on the first of them, so the
+        desktop app could not be constructed at all. It is also the single place
+        where the two validity gates reach the engine, so the desktop refuses
+        what the web refuses.
+        """
+        mode = mapping_mode or getattr(self, "_mapping_mode_pending", "fixed")
+        want_canary = self._canary_requested()
+        available = self._canary_available()
+        if want_canary and not available:
+            self._set_status(self._t("canary_unavailable"))
+        engine = ABXEngine(
+            planned_trials=self._planned_trials_from_ui(),
+            label_mode="blind_random" if mode == "blind_random" else "fixed",
+            canary_enabled=bool(want_canary and available),
+        )
+        prepared = getattr(self, "prepared_session", None)
+        if prepared is not None:
+            engine.set_null_gate(getattr(prepared, "null_gate", None) or None)
+        self.engine = engine
+        self._sync_engine_audio_mode()
+        return engine
+
+    def _on_planned_trials_changed(self, value: int) -> None:
+        """Pre-registration: N is fixed BEFORE the first answer.
+
+        Refusing a change mid-run is the point: redrawing the pass criterion
+        after seeing the data is exactly how a p-value stops meaning anything.
+        The spin snaps back and the reason is stated.
+        """
+        engine = getattr(self, "engine", None)
+        if engine is None:
+            return
+        if engine.stats().total_trials > 0:
+            registered = engine.planned_trials
+            self._set_status(self._t("planned_n_locked"))
+            spin = self.planned_trials_spin
+            spin.blockSignals(True)
+            spin.setValue(int(registered) if registered else int(value))
+            spin.blockSignals(False)
+            return
+        engine.set_planned_trials(int(value) if int(value) > 0 else None)
+        self._refresh_diagnostics_panel()
+
+    def _sync_engine_audio_mode(self) -> None:
+        """Load the audio the staged trial needs: codec pair, or calibration pair.
+
+        The player has one A/B slot. A calibration trial is a different pair -
+        the delivered Side A against the same material band-limited and hard
+        clipped - so entering or leaving that mode swaps the buffers and
+        re-applies the X mapping. The user is told which mode they are in; they
+        are never told which side X is.
+        """
+        engine = getattr(self, "engine", None)
+        if engine is None:
+            return
+        want_canary = bool(engine.is_canary_trial)
+        if want_canary == self._player_canary_mode:
+            self._sync_player_x_mapping()
+            self._refresh_gate_status()
+            return
+
+        prepared = getattr(self, "prepared_session", None)
+        self.player.stop()
+        if want_canary and prepared is not None and prepared.canary_pristine_path:
+            try:
+                pristine, sr = AudioPipeline.load_audio(
+                    str(prepared.canary_pristine_path)
+                )
+                degraded, _ = AudioPipeline.load_audio(
+                    str(prepared.canary_degraded_path)
+                )
+            except Exception as exc:
+                self._set_status(f"{self._t('canary_unavailable')}: {exc}")
+                return
+            n = min(len(pristine), len(degraded))
+            self.player.load_buffers(pristine[:n], degraded[:n], sr)
+            self._player_canary_mode = True
+        else:
+            buffers = getattr(self, "_codec_buffers", None)
+            if buffers is not None:
+                arr_a, arr_b, sr = buffers
+                self.player.load_buffers(arr_a, arr_b, sr)
+                self._player_canary_mode = False
+        self._sync_player_x_mapping()
+        self._refresh_gate_status()
+
+    def _refresh_gate_status(self) -> None:
+        """Calibration and null-gate state on the panel, in the app's words."""
+        label = getattr(self, "gate_status_label", None)
+        if label is None:
+            return
+        engine = getattr(self, "engine", None)
+        if engine is None:
+            return
+        stats = engine.stats()
+        status = engine.gates()["canary"].get("status")
+        key = {
+            "not_configured": "canary_not_configured",
+            "pending": "canary_pending",
+            "passed": "canary_passed",
+            "failed": "canary_failed",
+            "unavailable": "canary_unavailable",
+            "not_measured": "canary_not_configured",
+        }.get(status, "canary_not_configured")
+        text = f"{self._t('canary_status')}: {self._t(key)}"
+        if stats.null_gate_status == "failed":
+            text = f"{self._t('diag_null_gate')}: {stats.null_gate_status} | {text}"
+        if stats.current_trial_kind == "canary":
+            text = f"{self._t('canary_trial_badge')} | {text}"
+        if stats.void:
+            text = f"{self._t('diag_run_void')} | {text}"
+        label.setText(text)
 
     def _configure_display_mapping(self, mapping_mode: str) -> None:
         """Legacy entry point kept for call-site stability.
@@ -2007,24 +2277,54 @@ class MainWindow(QMainWindow):
         mapping_changed = mapping_before != self.engine.display_mapping
 
         stats = self.engine.stats()
-        self.logger.add_trial(
-            TrialResult(
-                trial_index=stats.total_trials,
-                x_is=x_is_before,
-                answer=answer,
-                correct=correct,
-                timestamp_utc=self.logger.utc_now_iso(),
-                mapping_a_to=mapping_before.get("A"),
-                mapping_b_to=mapping_before.get("B"),
-                x_source=x_source_before,
-                answer_source=answer_source_before,
-                mapping_changed_for_next_trial=mapping_changed,
-            )
-        )
+        trial = self.engine.last_trial
+        is_canary = trial is not None and trial.kind == "canary"
 
-        self._sync_player_x_mapping()
+        if is_canary:
+            # The calibration trial goes into the session block, NOT the scored
+            # trial table: counting it would silently change the binomial the
+            # whole study rests on. It is exported and displayed all the same.
+            self.logger.set_session_info(
+                {
+                    **self.logger.session_info,
+                    "canary": canary_report_block(
+                        self.engine.gates()["canary"],
+                        getattr(self.prepared_session, "canary", None) or {},
+                    ),
+                }
+            )
+        else:
+            self.logger.add_trial(
+                TrialResult(
+                    trial_index=stats.total_trials,
+                    x_is=x_is_before,
+                    answer=answer,
+                    correct=correct,
+                    timestamp_utc=self.logger.utc_now_iso(),
+                    mapping_a_to=mapping_before.get("A"),
+                    mapping_b_to=mapping_before.get("B"),
+                    x_source=x_source_before,
+                    answer_source=answer_source_before,
+                    mapping_changed_for_next_trial=mapping_changed,
+                )
+            )
+
+        # The next staged trial may need different audio (calibration pair vs
+        # codec pair), so the buffers are re-synced, not just the X mapping.
+        self._sync_engine_audio_mode()
         self._update_score_ui()
+        self._refresh_gate_status()
         self._refresh_diagnostics_panel()
+
+        if self.engine.gate_closed:
+            # A failed gate is stated where the user is looking, in words, and
+            # the answer buttons stop mattering because nothing is staged.
+            QMessageBox.warning(
+                self,
+                self._t("gate_blocked_title"),
+                self._t("gate_blocked_text").format(reasons=self.engine.gate_closed),
+            )
+            self._set_status(self._t("diag_run_void"))
 
     def on_cancel_session(self) -> None:
         self.player.stop()
@@ -2095,6 +2395,13 @@ class MainWindow(QMainWindow):
                 "ability_ci95": stats.ability_ci95,
             },
             commitment=self.engine.session_commitment,
+            # Phase 1 gates: same blocks, same wording as the web diagnostics
+            # and the JSON export (core.report).
+            canary=canary_report_block(
+                self.engine.gates()["canary"],
+                getattr(self.prepared_session, "canary", None) or {},
+            ),
+            null_gate=self.engine.null_gate_block(),
             t=self._t,
         )
 
@@ -2256,6 +2563,12 @@ class MainWindow(QMainWindow):
         the run differ from what the user asked for -- codec substitution,
         resampler downgrade -- must be in it, and the commit-reveal block lets
         a third party confirm the X sequence was fixed in advance.
+
+        Note on the sequence: it covers EVERY trial issued, so position 1 is the
+        calibration trial and the scored trials follow at 2..N+1. The scored
+        trial table stays 10 columns wide (the calibration trial is not one of
+        the trials the binomial counts); `canary.x_source` is the first element
+        of `verifiability.x_sequence`, so the whole sequence is checkable.
         """
         prepared = self.prepared_session
         stats = self.engine.stats()
@@ -2276,7 +2589,19 @@ class MainWindow(QMainWindow):
                 "required_correct": stats.required_correct,
                 "significant": stats.significant,
                 "ability_ci95": stats.ability_ci95,
+                "void": stats.void,
+                "run_valid": stats.run_valid,
+                "verdict": stats.verdict,
             },
+            # Phase 1 gates: the export says what was verified before any trial
+            # counted, and a failed gate voids the run in the file itself.
+            canary=canary_report_block(
+                self.engine.gates()["canary"],
+                getattr(prepared, "canary", None) if prepared else None,
+            ),
+            null_gate=self.engine.null_gate_block(),
+            gates=self.engine.gates(),
+            run_valid=self.engine.run_valid,
         )
 
     def on_export_json(self) -> None:

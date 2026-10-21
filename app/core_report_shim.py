@@ -12,6 +12,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from core.report import null_depth_text, validity_lines  # noqa: E402,F401
+from core.report import (  # noqa: E402,F401
+    canary_report_block,
+    null_depth_text,
+    validity_lines,
+)
 
-__all__ = ["null_depth_text", "validity_lines"]
+__all__ = ["canary_report_block", "null_depth_text", "validity_lines"]

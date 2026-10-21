@@ -113,6 +113,18 @@
                 <span class="hint" data-i18n="planned_n_hint">Set this before you answer. Stopping because the running p-value looks good inflates false positives.</span>
             </div>
 
+            <!-- Calibration (canary) gate: trial 1 has a KNOWN answer - X is
+                 the clean sample against a grossly degraded one. Miss it and
+                 the run is void, because the playback chain or the attention
+                 is not working. Recorded, never counted in the statistics. -->
+            <div class="config-row" id="canaryRow">
+                <label for="canaryEnabled">
+                    <input type="checkbox" id="canaryEnabled" checked>
+                    <span data-i18n="canary_label">Calibration trial (canary) gates this session</span>
+                </label>
+                <span class="hint" data-i18n="canary_hint">Trial 1 is deliberately easy with a known answer. Miss it and the whole run is void. It is recorded, never counted.</span>
+            </div>
+
             <!-- Preprocess Button & Progress -->
             <div class="preprocess-area">
                 <button id="btnPreprocess" class="btn btn-primary" onclick="startPreprocess()" data-i18n="preprocess_btn">▶ Preprocess & Validate</button>
@@ -139,6 +151,15 @@
             <div class="trial-info">
                 <span id="trialCounter" data-i18n-template="trial_counter">Trial: 0 / 0</span>
                 <span id="scoreDisplay" data-i18n-template="score_display">Score: 0 correct</span>
+            </div>
+
+            <!-- Validity gates. A failed gate voids the run: the banner says
+                 why, and trial start is refused server-side (409). -->
+            <div id="gateBanner" class="validation-result hidden">
+                <span id="gateBannerText"></span>
+            </div>
+            <div id="canaryBadge" class="validation-result hidden">
+                <span data-i18n="canary_badge">CALIBRATION TRIAL — known answer, deliberately easy, not counted in the statistics</span>
             </div>
 
             <!-- Audio Buttons -->
@@ -186,6 +207,10 @@
                     <tr><td data-i18n="total_trials_label">Total Trials:</td><td id="statTotal">0</td></tr>
                     <tr><td data-i18n="correct_label">Correct:</td><td id="statCorrect">0</td></tr>
                     <tr><td data-i18n="p_value_label">One-tailed p-value:</td><td id="statPValue">1.0000</td></tr>
+                    <!-- Phase 1: the gates are part of the result, not a footnote. -->
+                    <tr><td data-i18n="canary_stat_label">Calibration:</td><td id="statCanary">-</td></tr>
+                    <tr><td data-i18n="null_gate_stat_label">Null gate:</td><td id="statNullGate">-</td></tr>
+                    <tr><td data-i18n="verdict_label">Verdict:</td><td id="statVerdict">-</td></tr>
                 </table>
             </div>
 

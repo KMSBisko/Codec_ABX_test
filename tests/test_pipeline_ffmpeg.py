@@ -330,3 +330,210 @@ def test_web_pipeline_reports_a_real_codec(tmp_path):
     export = json.loads(client.get("/api/export/json").data)
     assert export["session"]["verifiability"]["verifiable"] is True
     assert len(export["validity_lines"]) >= 4
+
+
+# ── Phase 1: the two validity gates on real audio ────────────────────────────
+
+
+def _wav_bytes_to_array(data: bytes):
+    """Decode served audio and downmix to mono: the same convention the web
+    pipeline uses for every measurement it reports."""
+    import io
+
+    import numpy as np
+    import soundfile as sf
+
+    arr, sr = sf.read(io.BytesIO(data), dtype="float32")
+    if arr.ndim > 1:
+        arr = np.mean(arr, axis=-1)
+    return arr, sr
+
+
+def test_canary_pair_is_real_audio_and_grossly_degraded(make_pipeline, source, tmp_path):
+    """The gate is only a gate if the material is audible and is the delivered
+    Side A: measured on the files that will actually be played."""
+    from app.audio_pipeline import AudioPipeline
+    from core.alignment import CANARY_MIN_DEGRADATION_DB, null_depth_db
+
+    session, arr_a, _ = _run(
+        make_pipeline(), source, tmp_path,
+        ("noop_passthrough", 0), ("noop_passthrough", 0),
+        canary_enabled=True,
+    )
+
+    check = session.canary
+    assert check["usable"] is True, check
+    assert check["measured_db"] > CANARY_MIN_DEGRADATION_DB, check
+
+    pristine, sr = AudioPipeline.load_audio(session.canary_pristine_path)
+    degraded, _ = AudioPipeline.load_audio(session.canary_degraded_path)
+    assert sr == session.target_sample_rate
+
+    # Pristine must BE the delivered Side A, not a second normalized copy the
+    # listener never hears. The desktop writes PCM_16, so "the same signal" is
+    # bounded by 16-bit quantization: measured -76.1 dB residual here, against
+    # the -30 dB audibility floor this gate uses.
+    n = min(len(pristine), len(arr_a))
+    to_delivered = null_depth_db(pristine[:n], arr_a[:n])
+    assert to_delivered < -60.0, f"pristine is not the delivered A: {to_delivered}"
+
+    # The pair is audibly different, by a wide margin.
+    m = min(len(pristine), len(degraded))
+    on_disk = null_depth_db(pristine[:m], degraded[:m])
+    assert on_disk > CANARY_MIN_DEGRADATION_DB, on_disk
+
+    # And the codec pair itself is untouched by building the calibration audio.
+    depth = session.validation.null_depth_db
+    assert depth == float("-inf") or depth < -140.0, depth
+
+
+def test_null_gate_passes_identical_and_abstains_on_a_real_codec(
+    make_pipeline, source, tmp_path
+):
+    """The gate's two honest outcomes on measured audio: identical pipelines
+    PASS (perfect null), a real comparison is NOT_APPLICABLE - never blocked."""
+    from app.abx_engine import ABXEngine
+
+    same, _, _ = _run(
+        make_pipeline(), source, tmp_path,
+        ("noop_passthrough", 0), ("noop_passthrough", 0),
+    )
+    assert same.null_gate["status"] == "passed", same.null_gate
+    assert same.null_gate["applicable"] is True
+    assert same.null_gate["is_perfect"] is True
+
+    engine = ABXEngine(planned_trials=8)
+    engine.set_null_gate(same.null_gate)
+    assert engine.gate_open is True
+
+    pair, _, _ = _run(
+        make_pipeline(), source, tmp_path,
+        (_lossy_codec_id(), 128), ("noop_passthrough", 0),
+    )
+    assert pair.null_gate["status"] == "not_applicable", pair.null_gate
+    other = ABXEngine(planned_trials=8)
+    other.set_null_gate(pair.null_gate)
+    assert other.gate_open is True, "a real comparison must never be blocked"
+    assert "did NOT null" not in " | ".join(pair.validation.notes)
+
+
+def test_canary_off_by_default_leaves_the_desktop_session_unchanged(
+    make_pipeline, source, tmp_path
+):
+    """No behaviour change for anyone who does not turn the gate on: the fields
+    exist and say 'not requested', and no calibration files are written."""
+    import os
+
+    session, _, _ = _run(
+        make_pipeline(), source, tmp_path,
+        ("noop_passthrough", 0), ("noop_passthrough", 0),
+    )
+    assert session.canary["status"] == "not_configured"
+    assert session.canary_pristine_path is None
+    assert session.canary_degraded_path is None
+    assert session.null_gate["status"] == "passed"
+    assert not [p for p in os.listdir(os.path.dirname(session.track_a.pcm_path))
+                if p.startswith("canary_")]
+
+
+def test_web_pipeline_gates_the_session_with_real_audio(tmp_path):
+    """The web build: preprocessing measures both gates, trial 1 is the
+    calibration trial, and the audio it plays is the calibration pair."""
+    import io
+    import time
+
+    import web.app as m
+
+    src = tmp_path / "web_canary.wav"
+    _tone(src, seconds=2.0)
+    client = m.app.test_client()
+    try:
+        with open(src, "rb") as fh:
+            resp = client.post(
+                "/api/upload",
+                data={"file": (io.BytesIO(fh.read()), "src.wav")},
+                content_type="multipart/form-data",
+            )
+        assert resp.status_code == 200, resp.data
+
+        client.post(
+            "/api/config",
+            json={
+                "sample_rate_mode": "native",
+                "label_mapping_mode": "fixed",
+                "planned_trials": 4,
+                "canary_enabled": True,
+                "stages_a": [{"codec_id": "noop_passthrough", "bitrate_kbps": 0}],
+                "stages_b": [{"codec_id": "noop_passthrough", "bitrate_kbps": 0}],
+                "bandwidth_limit_a_enabled": False,
+                "bandwidth_limit_b_enabled": False,
+            },
+        )
+        assert client.post("/api/preprocess", json={}).status_code == 200
+
+        status = {}
+        for _ in range(160):
+            status = json.loads(client.get("/api/preprocess/status").data)
+            if status.get("ready") or status.get("phase") == "error":
+                break
+            time.sleep(0.25)
+        assert status.get("ready"), f"preprocess did not finish: {status}"
+
+        diag = json.loads(client.get("/api/diagnostics").data)
+        md = diag["metadata"]
+        assert md["canary_requested"] is True
+        assert md["canary"]["usable"] is True, md["canary"]
+        assert md["null_gate"]["status"] == "passed", md["null_gate"]
+        assert diag["gates"]["open"] is True
+        assert diag["canary"]["status"] == "pending"
+        text = "\n".join(diag["validity_lines"])
+        assert "calibration material residual" in text, text
+        assert "PENDING at trial #1" in text
+
+        start = json.loads(client.post("/api/trial/start").data)
+        stats = json.loads(client.get("/api/trial/stats").data)
+        assert stats["current_trial_kind"] == "canary"
+
+        a_bytes = client.get("/api/audio/a").data
+        b_bytes = client.get("/api/audio/b").data
+        x_bytes = client.get(f"/api/audio/x?token={start['token']}").data
+        assert a_bytes and b_bytes and x_bytes in (a_bytes, b_bytes)
+        assert a_bytes != b_bytes, "a calibration pair with identical sides is a coin flip"
+
+        from core.alignment import CANARY_MIN_DEGRADATION_DB, null_depth_db
+
+        arr_a, _ = _wav_bytes_to_array(a_bytes)
+        arr_b, _ = _wav_bytes_to_array(b_bytes)
+        n = min(len(arr_a), len(arr_b))
+        heard = null_depth_db(arr_a[:n], arr_b[:n])
+        assert heard > CANARY_MIN_DEGRADATION_DB, f"calibration pair too subtle: {heard}"
+
+        with m.session.lock:
+            x_source = m.session.engine._pending.x_source
+            mapping = m.session.engine._pending.display_mapping
+        label = next(lbl for lbl, src_side in mapping.items() if src_side == x_source)
+        result = json.loads(
+            client.post("/api/trial/answer", json={"answer": label}).data
+        )
+        assert result["trial"]["kind"] == "canary"
+        assert result["stats"]["canary_status"] == "passed"
+
+        # After calibration the browser hears the codec pair again.
+        with m.session.lock:
+            delivered_a = open(m.session.audio_a_path, "rb").read()
+        assert client.get("/api/audio/a").data == delivered_a
+
+        export = json.loads(client.get("/api/export/json").data)
+        assert export["session"]["canary"]["status"] == "passed"
+        assert export["session"]["null_gate"]["status"] == "passed"
+        assert export["session"]["run_valid"] is True
+        assert export["trials"][0]["kind"] == "canary"
+    finally:
+        with m.session.lock:
+            m.session.canary_enabled = False
+            m.session.canary_available = True
+            m.session.canary_check = {}
+            m.session.canary_pristine_path = None
+            m.session.canary_degraded_path = None
+            m.session.null_gate = {}
+            m.session.reset_trials()

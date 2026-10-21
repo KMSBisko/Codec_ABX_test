@@ -139,6 +139,15 @@ class PreparedSession:
     # What the pipeline actually did vs what was requested (codec
     # substitutions, resampler downgrades). Goes into the export verbatim.
     disclosure: Dict[str, object] = field(default_factory=dict)
+    # Phase 1 validity gates, measured during preparation (core.alignment /
+    # core.canary). JSON-safe dicts: no Infinity, no shell-specific wording.
+    # `null_gate` refuses trials when a pair that should null does not;
+    # `canary` describes the deliberately-easy calibration pair that gates the
+    # session. Both go into the export so a reader sees what was verified.
+    null_gate: Dict[str, object] = field(default_factory=dict)
+    canary: Dict[str, object] = field(default_factory=dict)
+    canary_pristine_path: Optional[str] = None
+    canary_degraded_path: Optional[str] = None
 
 
 @dataclass

@@ -35,14 +35,27 @@ def client(tmp_path, monkeypatch):
     a.write_bytes(_wav(freq=440))
     b.write_bytes(_wav(freq=660))
 
-    with m.session.lock:
-        m.session.reset_trials()
-        m.session.audio_a_path = str(a)
-        m.session.audio_b_path = str(b)
-        m.session.planned_trials = None
-        m.session.session_metadata = {}
-        m.session.configure_engine()
+    def _reset():
+        with m.session.lock:
+            m.session.reset_trials()
+            # The Phase 1 gates are session-level too. A leftover canary switch
+            # or null-gate verdict from another test file would quietly change
+            # what trial 1 is here, so the state is cleared both ways.
+            m.session.canary_enabled = False
+            m.session.canary_available = True
+            m.session.canary_check = {}
+            m.session.canary_pristine_path = None
+            m.session.canary_degraded_path = None
+            m.session.null_gate = {}
+            m.session.audio_a_path = str(a)
+            m.session.audio_b_path = str(b)
+            m.session.planned_trials = None
+            m.session.session_metadata = {}
+            m.session.configure_engine()
+
+    _reset()
     yield m.app.test_client()
+    _reset()
 
 
 def test_trial_start_leaks_no_answer(client):

@@ -6,18 +6,23 @@ in all three, and it keeps the logic testable without Qt or Flask.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
+
+from .alignment import describe_depth
 
 T = Callable[[str], str]
 
 DEFAULT_LABELS: Dict[str, str] = {
     "diag_validity_block": "── Test validity evidence ──",
     "diag_null_depth": "Null depth (A-B residual)",
+    "diag_null_gate": "Null gate (identical-pair check)",
     "diag_alignment": "Alignment",
     "diag_loudness_pre": "Loudness delta BEFORE normalization",
     "diag_loudness_residual": "Loudness residual after matching",
     "diag_codec_substituted": "Codec substituted",
     "diag_resample_engine": "Resample engine",
+    "diag_canary": "Calibration (canary) trial",
+    "diag_run_void": "RUN VOID",
     "diag_note": "NOTE",
     "diag_verdict": "Verdict",
     "diag_no_planned_n": (
@@ -29,13 +34,89 @@ DEFAULT_LABELS: Dict[str, str] = {
 
 def null_depth_text(null_depth_db: Optional[float]) -> str:
     """A perfect null is -inf, which must not print as the biggest number."""
-    if null_depth_db is None:
-        return "not measured"
-    if null_depth_db == float("-inf"):
-        return "perfect (-inf dB)"
-    if null_depth_db == float("inf") or null_depth_db != null_depth_db:  # nan
-        return "undefined (silence in reference)"
-    return f"{null_depth_db:.2f} dB"
+    return describe_depth(null_depth_db)
+
+
+def canary_report_block(
+    engine_block: Optional[Mapping[str, Any]],
+    material: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """The engine's canary state, annotated with the measured material.
+
+    The engine knows what the LISTENER did with the calibration trial; only the
+    preparation step knows how audible the material itself was (silent input
+    degrades to silence, so the gate gets disabled instead of voiding runs at
+    random). Both shells merge the two here, so the desktop panel, the web
+    diagnostics and the JSON export cannot end up phrasing it differently.
+    """
+    block = dict(engine_block or {})
+    check = dict(material or {})
+    if check.get("measured_text"):
+        block["residual_text"] = check["measured_text"]
+        block["residual_db"] = check.get("measured_db")
+    if check.get("status") == "not_audible" and block.get("status") == "not_configured":
+        block["status"] = "unavailable"
+        block["reason"] = check.get("reason", "calibration material is not audible")
+    block["material"] = check
+    return block
+
+
+def _canary_line(canary: Dict[str, Any], tr: T) -> str:
+    """One line saying what the calibration trial proved, or that it proved
+    nothing because it was not configured."""
+    status = canary.get("status")
+    index = canary.get("trial_index")
+    residual = canary.get("residual_text")
+    tail = f" (calibration material residual {residual})" if residual else ""
+
+    if status == "not_configured":
+        detail = "not configured: this run has no calibration trial"
+    elif status == "pending":
+        detail = f"PENDING at trial #{index or 1}: must be passed before scored trials"
+    elif status == "passed":
+        detail = f"PASSED at trial #{index}: playback chain and attention confirmed"
+    elif status == "failed":
+        detail = (
+            f"FAILED at trial #{index}: the deliberately-easy trial was missed, "
+            f"so this run is void"
+        )
+    elif status == "unavailable":
+        detail = f"unavailable: {canary.get('reason', 'calibration material is not audible')}"
+    else:
+        detail = str(status)
+    return f"{tr('diag_canary')}: {detail}{tail}"
+
+
+def _null_gate_line(gate: Dict[str, Any], tr: T) -> str:
+    status = gate.get("status")
+    measured = gate.get("measured_text", "not measured")
+    threshold = gate.get("threshold_db")
+    floor = f"{threshold:.1f} dB" if isinstance(threshold, (int, float)) else "?"
+
+    if status == "not_measured":
+        detail = "not measured (no pair processed yet)"
+    elif status == "not_applicable":
+        detail = "not applicable: sides are configured differently, no null expected"
+    elif status == "passed":
+        detail = f"PASSED: {measured} at or below the {floor} floor"
+    elif status == "failed":
+        detail = (
+            f"FAILED: {measured} is above the {floor} floor - identical "
+            f"pipelines are not level/phase matched, this run is void"
+        )
+    else:
+        detail = f"{status}: {measured}"
+    return f"{tr('diag_null_gate')}: {detail}"
+
+
+def _void_reason(canary: Optional[Dict[str, Any]], gate: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Why the run is void, if a gate voids it. The p-value does not get a vote."""
+    reasons = []
+    if canary and canary.get("status") == "failed":
+        reasons.append("calibration (canary) trial failed")
+    if gate and gate.get("status") == "failed":
+        reasons.append("null gate failed (identical pair did not null)")
+    return "; ".join(reasons) if reasons else None
 
 
 def validity_lines(
@@ -48,13 +129,17 @@ def validity_lines(
     notes: Optional[List[str]] = None,
     stats: Optional[Dict[str, Any]] = None,
     commitment: Optional[str] = None,
+    canary: Optional[Dict[str, Any]] = None,
+    null_gate: Optional[Dict[str, Any]] = None,
     t: Optional[T] = None,
 ) -> List[str]:
     """The evidence a reader needs to judge a run, not just its outcome.
 
     Null depth and alignment confidence are measurements of claims the
     pipeline makes about itself. The disclosure block states anything that
-    differs from what the user asked for.
+    differs from what the user asked for. The two gates -- calibration trial
+    and identical-pair null -- state whether the run was allowed to happen at
+    all: a failed gate voids the verdict no matter what the p-value says.
     """
     tr: T = t if t is not None else (lambda key: DEFAULT_LABELS.get(key, key))
     lines: List[str] = []
@@ -62,6 +147,8 @@ def validity_lines(
     lines.append(
         f"{tr('diag_null_depth')}: {null_depth_text(null_depth_db)}"
     )
+    if null_gate:
+        lines.append(_null_gate_line(null_gate, tr))
     lines.append(
         f"{tr('diag_alignment')}: lag={alignment_lag_samples} samples, "
         f"confidence={alignment_confidence:.4f}"
@@ -105,9 +192,16 @@ def validity_lines(
     for note in notes or []:
         lines.append(f"{tr('diag_note')}: {note}")
 
+    if canary:
+        lines.append(_canary_line(canary, tr))
+
+    void_reason = _void_reason(canary, null_gate)
+
     if stats:
         if stats.get("planned_trials"):
-            state = "FINAL" if stats.get("is_final") else "PROVISIONAL"
+            state = "VOID" if void_reason else (
+                "FINAL" if stats.get("is_final") else "PROVISIONAL"
+            )
             ci = stats.get("ability_ci95") or [0.0, 1.0]
             lines.append(
                 f"{tr('diag_verdict')}: {state} at N={stats['planned_trials']}, "
@@ -116,6 +210,8 @@ def validity_lines(
             )
         else:
             lines.append(tr("diag_no_planned_n"))
+        if void_reason:
+            lines.append(f"{tr('diag_run_void')}: {void_reason}")
 
     if commitment:
         lines.append(f"{tr('diag_commitment')}: {commitment[:16]}...")

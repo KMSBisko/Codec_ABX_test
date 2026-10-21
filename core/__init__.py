@@ -1,30 +1,86 @@
 """Shell-independent core for the codec ABX tool.
 
-Import discipline: `core/` must not import PyQt6, Flask, numpy, sounddevice or
-any audio backend. Desktop and web are thin shells over this package, so the
-same study produces the same statistics in both.
+Import discipline: `core/` must not import PyQt6, Flask, sounddevice or
+any audio backend (numpy is allowed). Desktop and web are thin shells over this
+package, so the same study produces the same statistics, the same gates and the
+same wording in both.
 """
-from .report import null_depth_text, validity_lines
-from .alignment import align_pair, estimate_lag, null_depth_db
+from .report import canary_report_block, null_depth_text, validity_lines
+from .alignment import (
+    CANARY_MIN_DEGRADATION_DB,
+    NULL_GATE_THRESHOLD_DB,
+    align_pair,
+    canary_audio_check,
+    describe_depth,
+    estimate_lag,
+    identical_pipeline_config,
+    json_safe_depth,
+    null_depth_db,
+    null_gate_decision,
+)
 from .abx import (
+    CANARY_FAILED,
+    CANARY_NOT_CONFIGURED,
+    CANARY_PASSED,
+    CANARY_PENDING,
     LABEL_MODE_BLIND,
     LABEL_MODE_FIXED,
+    NULL_GATE_FAILED,
+    NULL_GATE_NOT_APPLICABLE,
+    NULL_GATE_NOT_MEASURED,
+    NULL_GATE_PASSED,
+    TRIAL_KIND_CANARY,
+    TRIAL_KIND_NORMAL,
     ABXEngine,
+    CanaryFailedError,
     Trial,
+    TrialGateClosed,
     TrialPlan,
     commitment,
     verify_commitment,
     x_sequence,
 )
+from .canary import (
+    CANARY_CUTOFF_HZ,
+    CANARY_CLIP_LEVEL,
+    CANARY_DRIVE,
+    build_canary_pair,
+    degrade_for_canary,
+)
 
 __all__ = [
     "ABXEngine",
     "align_pair",
+    "build_canary_pair",
+    "canary_audio_check",
+    "CANARY_CUTOFF_HZ",
+    "CANARY_CLIP_LEVEL",
+    "CANARY_DRIVE",
+    "CANARY_MIN_DEGRADATION_DB",
+    "CANARY_FAILED",
+    "CANARY_NOT_CONFIGURED",
+    "CANARY_PASSED",
+    "CANARY_PENDING",
+    "CanaryFailedError",
+    "degrade_for_canary",
+    "describe_depth",
+    "identical_pipeline_config",
+    "json_safe_depth",
     "null_depth_text",
     "validity_lines",
+    "canary_report_block",
     "estimate_lag",
     "null_depth_db",
+    "null_gate_decision",
+    "NULL_GATE_THRESHOLD_DB",
+    "NULL_GATE_FAILED",
+    "NULL_GATE_NOT_APPLICABLE",
+    "NULL_GATE_NOT_MEASURED",
+    "NULL_GATE_PASSED",
+    "TRIAL_KIND_CANARY",
+    "TRIAL_KIND_NORMAL",
     "Trial",
+    "TrialGateClosed",
     "TrialPlan",
     "LABEL_MODE_FIXED",
     "LABEL_MODE_BLIND",

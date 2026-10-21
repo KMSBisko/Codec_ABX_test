@@ -16,7 +16,14 @@ import pyloudnorm as pyln
 import soundfile as sf
 from scipy import signal
 
-from core.alignment import align_pair, estimate_lag, null_depth_db
+from core.alignment import (
+    align_pair,
+    estimate_lag,
+    identical_pipeline_config,
+    null_depth_db,
+    null_gate_decision,
+)
+from core.canary import build_canary_pair
 
 from .models import (
     CodecProfile,
@@ -572,6 +579,15 @@ class AudioPipeline:
         data, sr = sf.read(path, always_2d=True, dtype="float32")
         return data, int(sr)
 
+    @classmethod
+    def load_audio(cls, path: str) -> Tuple[np.ndarray, int]:
+        """Public reader for prepared WAVs.
+
+        The GUI loads the calibration (canary) pair with this, so it uses the
+        same decode path as the pipeline itself: no second WAV loader.
+        """
+        return cls._load_audio(path)
+
     @staticmethod
     def _estimate_lag_samples(a: np.ndarray, b: np.ndarray, max_lag: int) -> Tuple[int, float]:
         """Delegates to core.alignment (shared with the web build)."""
@@ -671,6 +687,7 @@ class AudioPipeline:
         bandwidth_limit_a_hz: Optional[int] = None,
         bandwidth_limit_b_enabled: bool = False,
         bandwidth_limit_b_hz: Optional[int] = None,
+        canary_enabled: bool = False,
     ) -> Tuple[PreparedSession, np.ndarray, np.ndarray]:
         self._reset_cancel()
         self.check_binaries()
@@ -857,6 +874,47 @@ class AudioPipeline:
                 f"aligned on identical content; treat this run as suspect"
             )
 
+        # ── Phase 1 validity gates ───────────────────────────────────────────
+        # Both decisions come from core, so the desktop and the web refuse the
+        # same pairs for the same measured reasons. `notes` is the list already
+        # handed to SessionValidation below: appending here surfaces the gate
+        # in the validation panel AND in the export.
+        null_gate = null_gate_decision(
+            null_depth_db=null_depth,
+            expected_identical=identical_pipeline_config(
+                stage_results_a,
+                stage_results_b,
+                bandwidth_a=(bandwidth_limit_a_enabled, bandwidth_limit_a_hz),
+                bandwidth_b=(bandwidth_limit_b_enabled, bandwidth_limit_b_hz),
+            ),
+        )
+        if null_gate["status"] == "failed":
+            notes.append(null_gate["reason"])
+
+        # Calibration (canary) material: the delivered Side A against the same
+        # sample band-limited to 3 kHz and hard clipped. `core.canary` defines
+        # the degradation, so both shells build it identically.
+        canary: Dict[str, object] = {
+            "status": "not_configured",
+            "usable": False,
+            "reason": "calibration trial not requested for this session",
+        }
+        canary_pristine_path: Optional[str] = None
+        canary_degraded_path: Optional[str] = None
+        if canary_enabled:
+            pristine, degraded, canary = build_canary_pair(arr_a, target_sr)
+            if canary.get("usable"):
+                canary_pristine_path = str(wd / "canary_pristine.wav")
+                canary_degraded_path = str(wd / "canary_degraded.wav")
+                self._write_float_wav(canary_pristine_path, pristine, target_sr)
+                self._write_float_wav(canary_degraded_path, degraded, target_sr)
+                canary["pristine_path"] = canary_pristine_path
+                canary["degraded_path"] = canary_degraded_path
+            else:
+                # Silent input degrades to silence: a coin flip cannot gate a
+                # run, so the gate is off and the reason is on the record.
+                notes.append(f"calibration trial disabled: {canary['reason']}")
+
         validation = SessionValidation(
             sample_rate_equal=(sr_a == sr_b == target_sr),
             lengths_equal=(len(arr_a) == len(arr_b)),
@@ -920,6 +978,11 @@ class AudioPipeline:
             track_a=track_a,
             track_b=track_b,
             validation=validation,
+            # Phase 1 gates: JSON-safe dicts, exported verbatim by both shells.
+            null_gate=null_gate,
+            canary=canary,
+            canary_pristine_path=canary_pristine_path,
+            canary_degraded_path=canary_degraded_path,
         )
 
         return session, arr_a, arr_b

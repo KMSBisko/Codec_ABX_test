@@ -327,26 +327,65 @@ def test_web_pipeline_reports_a_real_codec(tmp_path):
     assert md["null_depth_db"] is not None and md["null_depth_db"] > -60.0
     assert md["alignment_confidence"] > 0.5
 
+    # Nothing has been answered yet, so an export taken now must NOT carry the
+    # secret: the secret derives X for every one of the 8 registered trials that
+    # is still due. The redacted form is what makes an early export safe.
     export = json.loads(client.get("/api/export/json").data)
-    assert export["session"]["verifiability"]["verifiable"] is True
+    reveal = export["session"]["verifiability"]
+    assert reveal["redacted"] is True, "a run with answers due must not reveal"
+    assert reveal["verifiable"] is False
+    assert reveal["secret_hex"] is None
+    assert reveal["commitment"], "the commitment is public even when redacted"
+    assert export["session"]["export_is_redacted"] is True
+    assert export["session"]["incomplete"] is True
+    assert export["session"]["lifecycle"] in ("configured", "running")
+
+    # Sealing closes the run, releases the key, and labels the run: the early
+    # export becomes auditable, and is never presented as a result.
+    sealed = json.loads(
+        client.post("/api/trial/seal", json={"reason": "pipeline test"}).data
+    )
+    assert sealed["lifecycle"] == "aborted"
+    assert sealed["can_accept_answers"] is False
+
+    export = json.loads(client.get("/api/export/json").data)
+    reveal = export["session"]["verifiability"]
+    assert reveal["verifiable"] is True, "a sealed run's export is checkable"
+    assert reveal["redacted"] is False
+    assert reveal["secret_hex"]
+    session_block = export["session"]
+    assert session_block["sealed"] is True
+    assert session_block["complete"] is False
+    assert session_block["incomplete"] is True
+    assert session_block["export_is_redacted"] is False
+    # The verdict names the audio it describes: the digest of the pair that was
+    # rendered by THIS configuration, recorded at preprocess.
+    assert session_block["prepared_audio"]["id"].startswith("sha256:")
+    assert session_block["prepared_audio"]["config_fingerprint"]
+    # The panel, the export and the desktop all say SEALED, never FINAL.
+    assert any("SEALED" in line for line in export["validity_lines"])
     assert len(export["validity_lines"]) >= 4
+
+    # A sealed run is history: its configuration is frozen, and the only way
+    # forward is a new run (the web Preprocess button offers exactly this). The
+    # reset opens one; the sealed run's export above is untouched.
+    frozen = client.post("/api/config", json={"planned_trials": 99})
+    assert frozen.status_code == 409, "a closed run's plan is not editable"
+    assert json.loads(frozen.data)["sealed"] is True
+    assert client.post("/api/trial/reset", json={}).status_code == 200
+    assert json.loads(client.get("/api/config").data)["lifecycle"] == "configured"
 
 
 # ── Phase 1: the two validity gates on real audio ────────────────────────────
 
 
 def _wav_bytes_to_array(data: bytes):
-    """Decode served audio and downmix to mono: the same convention the web
-    pipeline uses for every measurement it reports."""
+    """Decode every delivered channel: measurement must not hide stereo residuals."""
     import io
 
-    import numpy as np
     import soundfile as sf
 
-    arr, sr = sf.read(io.BytesIO(data), dtype="float32")
-    if arr.ndim > 1:
-        arr = np.mean(arr, axis=-1)
-    return arr, sr
+    return sf.read(io.BytesIO(data), dtype="float32", always_2d=True)
 
 
 def test_canary_pair_is_real_audio_and_grossly_degraded(make_pipeline, source, tmp_path):

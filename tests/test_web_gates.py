@@ -53,6 +53,17 @@ def client(tmp_path, monkeypatch):
         m.session.audio_b_path = str(b)
         m.session.planned_trials = None
         m.session.session_metadata = {}
+        # The session object is module-level and shared by every web test, and
+        # the tests here compare the BYTES served at a display label ("A", "B")
+        # with a named source file. That comparison only has a fixed meaning in
+        # a fixed mapping, and the mode is part of the configuration a previous
+        # test module may have left behind -- so pin it, rather than relying on
+        # collection order. In blind mode the server maps A/B per trial, and the
+        # bytes at "A" are whatever that trial's display slot points at.
+        m.session.label_mapping_mode = m.LabelMappingMode.FIXED
+        m.session.prepared_audio = None
+        m.session.prepared_config_fingerprint = None
+        m.session.stale_audio_reason = None
         m.session.configure_engine()
     yield m.app.test_client()
     with m.session.lock:
@@ -161,6 +172,46 @@ def test_canary_trial_serves_the_calibration_pair(client):
     assert client.get(f"/api/audio/x?token={plan['token']}").data == expected
     # The codec pair is still what a normal trial plays.
     assert client.get("/api/audio/a").data != degraded
+
+
+def test_calibration_switch_reuses_the_rendered_pair_and_reports_the_gate(client):
+    """The calibration pair is EXTRA material, not the delivered A/B bytes.
+
+    Flipping the switch must not throw away a long render, and must not leave
+    the run silently ungated either: when the calibration material exists the
+    gate arms, and when it does not the response says so plainly instead of
+    pretending a gate that has nothing to measure.
+    """
+    import web.app as m
+
+    body = json.loads(
+        client.post("/api/config", json={"canary_enabled": True, "planned_trials": 4}).data
+    )
+    assert body["audio_invalidated"] is False, (
+        "the A/B pair is not the calibration material; a calibration toggle "
+        "must not force a re-render of the pipeline"
+    )
+    # The fixture's pair was rendered WITH calibration material, so the gate
+    # arms and the calibration trial is what runs first.
+    assert body["canary_available"] is True
+    assert body["notes"] == []
+    assert json.loads(client.get("/api/session/info").data)["canary"]["status"] == "pending"
+
+    # Same switch on a session that has no calibration material: the gate
+    # reports unavailable, the response says why, and no run is silently gated.
+    with m.session.lock:
+        m.session.canary_pristine_path = None
+        m.session.canary_degraded_path = None
+    body = json.loads(
+        client.post("/api/config", json={"canary_enabled": True, "planned_trials": 4}).data
+    )
+    assert body["audio_invalidated"] is False, "the A/B pair survives the toggle"
+    assert body["canary_available"] is False
+    assert any("calibration" in note for note in body["notes"])
+    info = json.loads(client.get("/api/session/info").data)
+    assert info["canary_requested"] is True
+    assert info["canary_available"] is False
+    assert info["canary"]["status"] in ("unavailable", "not_configured")
 
 
 def test_canary_answer_routes_to_the_canary_not_the_scored_trials(client):

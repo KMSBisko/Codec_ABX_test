@@ -48,7 +48,7 @@ def test_core_never_imports_a_gui_or_web_framework():
 def test_core_is_importable_with_stdlib_plus_numpy_only():
     import importlib
 
-    for name in ("core.stats", "core.abx", "core.alignment"):
+    for name in ("core.stats", "core.abx", "core.alignment", "core.preparation"):
         importlib.import_module(name)
 
 

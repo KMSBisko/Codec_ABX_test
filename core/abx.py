@@ -6,7 +6,7 @@ The project previously carried two independent trial engines (PyQt6 desktop and
 Flask web) with *divergent* randomness and *divergent* blinding heuristics, so
 the same study produced different results per shell. This module replaces both.
 
-Four invariants:
+Five invariants:
 
 1. SCORING IS BLINDING-INDEPENDENT.  The display label mapping is a pure
    presentation concern. `fixed` and `blind_random` produce identical
@@ -38,6 +38,20 @@ Commit-reveal: the X sequence is derived from a random secret via SHA-256, so
 the commitment published at session start provably fixes the X sequence in
 advance. Any third party can recompute it from (secret, n) and confirm the
 tool did not cherry-pick X after seeing answers -- the canary included.
+
+5. A RUN IS AN EXPERIMENT WITH A LIFECYCLE, NOT A LOOP.  The plan is frozen
+   and the trial count is bounded:
+
+       configure -> prepare -> lock/run -> complete | abort -> reveal
+
+   `planned_trials`, `label_mode`, `canary_enabled` and the identity of the
+   prepared audio pair are frozen the moment the run starts (the first trial
+   staged: A/B/X is playable from then on), scored trials stop exactly at N,
+   and the secret is unreveable while the same run can still accept answers --
+   from the secret, X is derivable for every remaining trial, so a mid-run
+   export of the key is the study's answer sheet. An early reveal is available
+   only by sealing the run: sealed runs are auditable, are never labelled
+   final, and are distinguishable in the export from a redacted snapshot.
 """
 from __future__ import annotations
 
@@ -76,19 +90,54 @@ NULL_GATE_PENDING = "pending"
 NULL_GATE_PASSED = "passed"
 NULL_GATE_FAILED = "failed"
 
+# Run lifecycle. The point of naming these states is that the rules attached
+# to them live in one place: a run that is under way cannot be re-planned, a
+# run that has reached N issues no more trials, and a run that can still take
+# an answer does not publish its secret.
+STATE_CONFIGURED = "configured"   # plan set, nothing staged, everything editable
+STATE_RUNNING = "running"         # a trial is staged or answered: plan frozen
+STATE_COMPLETED = "completed"     # N reached as pre-registered: reveal allowed
+STATE_ABORTED = "aborted"         # sealed by the tester: reveal allowed, no result
+
 _COMMIT_PREFIX = b"ABX1\x00"
 
 
-class TrialGateClosed(RuntimeError):
+class StudyLifecycleError(RuntimeError):
+    """Base for lifecycle refusals. Carries plain-language `reasons` so every
+    shell can surface the same explanation in its own widget."""
+
+    def __init__(self, message: str, reasons: Optional[Iterable[str]] = None) -> None:
+        super().__init__(message)
+        self.reasons: List[str] = list(reasons or [])
+
+
+class TrialLimitReached(StudyLifecycleError):
+    """The pre-registered N has been answered: no further scored trial.
+
+    This is the anti-peeking rule made structural. Before it existed,
+    `is_final` reported "final" at N while `new_trial()` kept issuing trials,
+    so a tester who did not like the p-value just kept going and the run had
+    no fixed N at all.
+    """
+
+
+class StudySealed(StudyLifecycleError):
+    """The run was aborted/sealed: it accepts no further answers, and a sealed
+    partial run is auditable but is never reported as a result."""
+
+
+class ConfigLocked(StudyLifecycleError):
+    """The plan was frozen when the run started. Redrawing N, the label mode
+    or the calibration switch after the listener can already hear A/B/X is
+    how a pass criterion gets moved under the data."""
+
+
+class TrialGateClosed(StudyLifecycleError):
     """Trials must not be run: a validity gate is closed.
 
     Carries the human-readable reasons so every shell can surface the same
     explanation in its own widget.
     """
-
-    def __init__(self, message: str, reasons: Optional[Iterable[str]] = None) -> None:
-        super().__init__(message)
-        self.reasons: List[str] = list(reasons or [])
 
 
 class CanaryFailedError(TrialGateClosed):
@@ -188,12 +237,19 @@ class ABXEngine:
 
     planned_trials: N declared BEFORE the first answer. The verdict is only
     `is_final` once n reaches N. p-values below N are marked provisional, which
-    is the structural fix for optional-stopping / p-hacking.
+    is the structural fix for optional-stopping / p-hacking. Reaching N also
+    ends the run: `new_trial()` refuses, so N is a bound, not a caption.
 
     canary_enabled: makes trial 1 a calibration trial with a known answer.
     When it is answered wrong, `new_trial()` raises and the verdict is VOID.
     It defaults to False so an engine built without a shell (and every
     pre-existing test) behaves exactly as before; both shells turn it on.
+
+    The lifecycle fields below are what makes the plan a plan: `run_lock` is
+    the frozen snapshot taken when the first trial is staged, `prepared_audio`
+    is the identity of the rendered pair the run was locked to, and
+    `lifecycle` decides whether answers are accepted and whether
+    `reveal()` may publish the secret.
     """
 
     planned_trials: Optional[int] = None
@@ -206,16 +262,227 @@ class ABXEngine:
     null_gate: Optional[Dict[str, Any]] = None
     _pending: Optional[TrialPlan] = None
     _rng_label: Any = None
+    lifecycle: str = STATE_CONFIGURED
+    prepared_audio: Optional[Dict[str, Any]] = None
+    run_lock: Optional[Dict[str, Any]] = None
+    sealed_reason: Optional[str] = None
+    sealed_at_utc: Optional[str] = None
+    completed_at_utc: Optional[str] = None
+
+    # Field names that must not move once a run is under way. The guard is in
+    # `__setattr__`, not in a setter, because the shells assign these fields
+    # directly -- a setter-only rule would be a rule for polite callers only.
+    _FROZEN_WHILE_ACTIVE = frozenset(
+        {"planned_trials", "label_mode", "alpha", "canary_enabled"}
+    )
 
     def __post_init__(self) -> None:
         if self.label_mode not in (LABEL_MODE_FIXED, LABEL_MODE_BLIND):
             raise ValueError(f"unknown label_mode {self.label_mode!r}")
         if self.planned_trials is not None and self.planned_trials < 1:
             raise ValueError("planned_trials must be >= 1")
+        if self.lifecycle not in (
+            STATE_CONFIGURED, STATE_RUNNING, STATE_COMPLETED, STATE_ABORTED
+        ):
+            raise ValueError(f"unknown lifecycle {self.lifecycle!r}")
         if self._rng_label is None:
             import random
 
             self._rng_label = random.SystemRandom()
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if (
+            name in self._FROZEN_WHILE_ACTIVE
+            and getattr(self, "lifecycle", STATE_CONFIGURED) != STATE_CONFIGURED
+        ):
+            raise ConfigLocked(
+                f"{name} is frozen for the duration of the run: the plan "
+                "(N, label mode, calibration, prepared audio) is fixed before "
+                "the answers, and a new plan needs a new run (reset)"
+            )
+        object.__setattr__(self, name, value)
+
+    # ── lifecycle: configure -> prepare -> lock/run -> complete | abort ─────
+    def has_answers(self) -> bool:
+        """Any recorded answer, calibration included."""
+        return bool(self.trials) or self.canary_trial is not None
+
+    def trial_in_flight(self) -> bool:
+        return self._pending is not None
+
+    def run_under_way(self) -> bool:
+        """The run has begun: a trial is staged (A/B/X is playable) or answered.
+
+        Freezing at the staged trial, not at the first answer, is deliberate:
+        the commitment is published and the audio is playable the moment trial
+        1 exists, so from there on a redrawn N is a criterion moved under data
+        that already exists.
+        """
+        return (
+            self.lifecycle != STATE_CONFIGURED
+            or self.has_answers()
+            or self.trial_in_flight()
+        )
+
+    def config_active(self) -> bool:
+        """Whether the plan is frozen (the shells ask this before editing)."""
+        return self.run_under_way()
+
+    def can_accept_answers(self) -> bool:
+        """Can this run still take a real answer? This is the reveal gate.
+
+        False when N is reached, when the run was sealed, and when a validity
+        gate closed (further trials are refused, so the remaining X is worth
+        nothing and the export can be audited).
+        """
+        if self.lifecycle in (STATE_COMPLETED, STATE_ABORTED):
+            return False
+        if not self.gate_open:
+            return False
+        if self.planned_trials is not None and self.total_trials >= self.planned_trials:
+            return False
+        return True
+
+    def why_no_answers(self) -> List[str]:
+        """Why the run is over, in plain words, for the export and the UI."""
+        if self.lifecycle == STATE_ABORTED:
+            return [
+                "run sealed/aborted"
+                + (f": {self.sealed_reason}" if self.sealed_reason else "")
+                + " -- a sealed partial run is auditable, not a result"
+            ]
+        if self.lifecycle == STATE_COMPLETED:
+            return [
+                f"pre-registered N={self.planned_trials} reached at "
+                f"n={self.total_trials}: the run is complete"
+            ]
+        if not self.gate_open:
+            return self.gate_reasons()
+        return []
+
+    def set_prepared_audio(self, identity: str, **details: Any) -> None:
+        """Record the identity of the rendered A/B pair this run will use.
+
+        The identity is whatever the shell can prove about the pair -- a digest
+        of the two rendered files plus a fingerprint of the configuration that
+        rendered them. Freezing it is what stops a run from being locked to, or
+        a verdict describing, audio that is not the pair that was prepared.
+        """
+        if self.run_under_way():
+            raise ConfigLocked(
+                "the prepared audio pair is frozen for the duration of the "
+                "run: a new pair means a new run (reset), so a verdict can "
+                "never describe audio the listener did not hear"
+            )
+        block: Dict[str, Any] = dict(details)
+        block["id"] = str(identity)
+        block.setdefault("prepared_at_utc", _utc_now())
+        self.prepared_audio = block
+
+    def lock_run(self, prepared_audio_id: Optional[str] = None) -> Dict[str, Any]:
+        """Freeze the plan and start the run.
+
+        `prepared_audio_id` is checked against the recorded pair: a shell that
+        tries to run on audio other than the pair it prepared is refused here,
+        in the one place both shells share.
+        """
+        if prepared_audio_id and self.prepared_audio:
+            expected = self.prepared_audio.get("id")
+            if expected and str(prepared_audio_id) != str(expected):
+                raise ValueError(
+                    f"run locked to prepared audio {prepared_audio_id!r} but "
+                    f"the prepared pair is {expected!r}: the rendered audio "
+                    "does not match the run (re-preprocess, then run)"
+                )
+        if self.lifecycle == STATE_CONFIGURED:
+            self.lifecycle = STATE_RUNNING
+            self.run_lock = {
+                "planned_trials": self.planned_trials,
+                "label_mode": self.label_mode,
+                "alpha": self.alpha,
+                "canary_enabled": bool(self.canary_enabled),
+                "prepared_audio_id": (
+                    prepared_audio_id
+                    or (self.prepared_audio or {}).get("id")
+                ),
+                "locked_at_utc": _utc_now(),
+            }
+        return dict(self.run_lock or {})
+
+    def abort(self, reason: Optional[str] = None) -> Dict[str, Any]:
+        """Seal the run: no further answers, secret released, never a result.
+
+        Early reveal is only honest if the run stops: while answers are
+        accepted the secret is the answer key for the trials still to come.
+        """
+        self.sealed_reason = str(reason) if reason else "sealed by the tester"
+        self.sealed_at_utc = _utc_now()
+        self.lifecycle = STATE_ABORTED
+        self._pending = None
+        return {"lifecycle": self.lifecycle, "sealed_reason": self.sealed_reason}
+
+    # Shells and users reach for this as "end the run now", so it is named both ways.
+    seal = abort
+
+    def _assert_not_sealed(self) -> None:
+        if self.lifecycle == STATE_ABORTED:
+            raise StudySealed(
+                "this run was sealed/aborted: it accepts no further answers",
+                self.why_no_answers(),
+            )
+
+    def _assert_below_n(self) -> None:
+        """Stop scored trials exactly at the pre-registered N."""
+        if self.planned_trials is None:
+            return
+        if self.total_trials < self.planned_trials:
+            return
+        if self.lifecycle != STATE_COMPLETED:
+            self.lifecycle = STATE_COMPLETED
+            self.completed_at_utc = _utc_now()
+        raise TrialLimitReached(
+            f"pre-registered N={self.planned_trials} reached: no further "
+            "scored trials (reset to start a new run)",
+            self.why_no_answers(),
+        )
+
+    def _maybe_complete(self) -> None:
+        if (
+            self.lifecycle == STATE_RUNNING
+            and self.planned_trials is not None
+            and self.total_trials >= self.planned_trials
+        ):
+            self.lifecycle = STATE_COMPLETED
+            self.completed_at_utc = _utc_now()
+
+    # ── configuration (frozen while a run is under way) ─────────────────────
+    def set_planned_trials(self, n: Optional[int]) -> None:
+        """Pre-register N. Refused once the run is under way."""
+        self._assert_config_editable("planned_trials")
+        if n is not None:
+            n = int(n)
+            if n < 1:
+                raise ValueError("planned_trials must be >= 1")
+        self.planned_trials = n
+
+    def set_label_mode(self, label_mode: str) -> None:
+        self._assert_config_editable("label_mode")
+        if label_mode not in (LABEL_MODE_FIXED, LABEL_MODE_BLIND):
+            raise ValueError(f"unknown label_mode {label_mode!r}")
+        self.label_mode = label_mode
+
+    def set_canary_enabled(self, enabled: bool) -> None:
+        self._assert_config_editable("canary_enabled")
+        self.canary_enabled = bool(enabled)
+
+    def _assert_config_editable(self, name: str) -> None:
+        if self.run_under_way():
+            raise ConfigLocked(
+                f"{name} is frozen for the duration of the run (answers "
+                f"recorded: {self.total_trials}, trial in flight: "
+                f"{self.trial_in_flight()}): reset to plan a new run",
+                [f"{name} is frozen: the plan is fixed before the answers"],
+            )
 
     # ── identity / verifiability ────────────────────────────────────────────
     @property
@@ -250,16 +517,51 @@ class ABXEngine:
         return sorted(out, key=lambda t: t.trial_index)
 
     def reveal(self) -> Dict[str, Any]:
-        """Publish at session end so the run is independently auditable."""
+        """Publish the answer key so the run is independently auditable.
+
+        The secret is the whole point of the block, and it is also the answer
+        key for every trial that has not been answered yet: X for trial i is
+        `sha256(secret + i)`. So it is released only when this run can no
+        longer accept an answer -- complete, sealed, or refused by a validity
+        gate. While answers are still accepted the block is an explicitly
+        REDACTED snapshot: the commitment and the answered part stay public
+        (every trial row already carries its own `x_source`, and the
+        commitment fixes the sequence in advance), the key does not.
+        """
         recorded = self.all_trials()
-        return {
+        can_answer = self.can_accept_answers()
+        reasons = self.why_no_answers()
+        block: Dict[str, Any] = {
             "commitment": self.session_commitment,
-            "secret_hex": self._secret.hex(),
+            "secret_hex": None if can_answer else self._secret.hex(),
+            # The answered part is always transcribed: it is not a secret, and
+            # a third party checking a finished run needs it verbatim.
             "x_sequence": x_sequence(self._secret, len(recorded)),
             "trials_covered": len(recorded),
             "canary_included": self.canary_trial is not None,
-            "verifiable": True,
+            "lifecycle": self.lifecycle,
+            "complete": self.lifecycle == STATE_COMPLETED,
+            "sealed": self.lifecycle == STATE_ABORTED,
+            "sealed_reason": self.sealed_reason,
+            "sealed_at_utc": self.sealed_at_utc,
+            "completed_at_utc": self.completed_at_utc,
+            "secret_revealed": not can_answer,
+            "redacted": can_answer,
+            # `verifiable` is the citable claim: a redacted snapshot cannot be
+            # recomputed by a third party, so it must not claim to be.
+            "verifiable": not can_answer,
+            "run_closed_for_answers": not can_answer,
         }
+        if can_answer:
+            block["reason"] = (
+                "redacted: the run can still accept answers, and the secret "
+                "derives X for every trial not yet answered "
+                f"(planned N={self.planned_trials}, answered n={self.total_trials}). "
+                "Finish N, or seal the run, for a verifiable export."
+            )
+        elif reasons:
+            block["reason"] = "; ".join(reasons)
+        return block
 
     # ── gates ───────────────────────────────────────────────────────────────
     @property
@@ -355,9 +657,24 @@ class ABXEngine:
         return not self.gates()["void"]
 
     def verdict(self) -> str:
-        """One-line verdict that cannot be reported as a pass once voided."""
+        """One-line verdict that cannot be reported as a pass once voided.
+
+        Order matters. A failed gate voids the run whatever the arithmetic
+        says. A sealed run is not a result at all, so it gets said before any
+        p-value is quoted. Below N, the number is descriptive.
+        """
         if not self.run_valid:
             return "VOID: " + "; ".join(self.gate_reasons())
+        if self.lifecycle == STATE_ABORTED:
+            return (
+                f"ABORTED at n={self.total_trials}"
+                + (
+                    f" of N={self.planned_trials}"
+                    if self.planned_trials is not None
+                    else ""
+                )
+                + f": sealed ({self.sealed_reason}), not a result"
+            )
         if self.planned_trials is None:
             return "no N pre-registered - p-value is descriptive, not a verdict"
         if not self.is_final:
@@ -397,8 +714,17 @@ class ABXEngine:
 
         Trial 1 is the calibration trial when the canary is enabled; it must be
         answered before any scored trial exists.
+
+        Refused, in this order: a sealed run, a closed validity gate, a run that
+        has reached its pre-registered N. The first call of a run locks the plan
+        (`lock_run`), so the N, label mode, calibration switch and prepared
+        audio that this sequence was drawn under are on the record.
         """
+        self._assert_not_sealed()
         self._assert_gate_open()
+        self._assert_below_n()
+        if self.lifecycle == STATE_CONFIGURED:
+            self.lock_run()
 
         is_canary = self.canary_enabled and self.canary_trial is None
         n = self._next_index()
@@ -422,7 +748,14 @@ class ABXEngine:
 
     def submit_answer(self, answer_display: str) -> Trial:
         """Score an answer given as a DISPLAY label ('A'/'B' as shown)."""
+        self._assert_not_sealed()
         if self._pending is None:
+            if self.lifecycle == STATE_COMPLETED:
+                raise TrialLimitReached(
+                    f"pre-registered N={self.planned_trials} reached: the run "
+                    "is complete and has no trial in flight",
+                    self.why_no_answers(),
+                )
             raise RuntimeError("no trial in progress; call new_trial() first")
         label = (answer_display or "").strip().upper()
         if label not in ("A", "B"):
@@ -450,6 +783,10 @@ class ABXEngine:
         else:
             self.trials.append(trial)
         self._pending = None
+        # Reaching N ends the run. This is where "no more trials" becomes
+        # structural: the answer that completes the pre-registration is the
+        # last answer the run accepts.
+        self._maybe_complete()
         return trial
 
     # ── statistics ──────────────────────────────────────────────────────────
@@ -467,13 +804,15 @@ class ABXEngine:
 
     @property
     def is_final(self) -> bool:
-        """True only when N was pre-registered and has been reached.
+        """True only when N was pre-registered, reached, and the run is over.
 
         Guards every "significant" claim: a provisional p-value is never
-        presented as a verdict.
+        presented as a verdict. A sealed/aborted run is never final -- an
+        incomplete run cannot become a result by having its key released.
         """
         return (
-            self.planned_trials is not None
+            self.lifecycle == STATE_COMPLETED
+            and self.planned_trials is not None
             and self.total_trials >= self.planned_trials
         )
 
@@ -494,14 +833,24 @@ class ABXEngine:
         p = self.p_value
         ci = binomial_ci(n, k)
         gates = self.gates()
+        significant = is_significant(n, k, self.alpha)
+        final = self.is_final
+        valid = self.run_valid
         return {
             "total_trials": n,
             "correct_trials": k,
             "p_value_one_tailed": p,
             "planned_trials": self.planned_trials,
-            "is_final": self.is_final,
-            "provisional": not self.is_final,
-            "significant": is_significant(n, k, self.alpha),
+            "is_final": final,
+            "provisional": not final,
+            # Raw arithmetic, unedited: it is what it is at any n.
+            "significant": significant,
+            # The claim a reader acts on. `significant` alone is not a pass:
+            # below N it is an unregistered peek, and on a void run the
+            # instrumentation itself failed. Both shells quote THIS to say
+            # "pass", so the guarded verdict cannot be bypassed by reading
+            # the raw field.
+            "significant_verdict": bool(significant and final and valid),
             "alpha": self.alpha,
             "required_correct": self.threshold,
             "ability_point": round(k / n, 4) if n else None,
@@ -511,22 +860,43 @@ class ABXEngine:
             "canary_status": gates["canary"]["status"],
             "null_gate": gates["null"],
             "gates": gates,
-            "run_valid": self.run_valid,
+            "run_valid": valid,
             "void": gates["void"],
             "verdict": self.verdict(),
             "current_trial_kind": self.current_trial_kind,
+            # Lifecycle: the run's state, and whether it can still take an
+            # answer. A finished run is `complete`; a run stopped early is
+            # `sealed`; neither is still answering, and only the first is a
+            # result. This is what the UI uses to stop advancing.
+            "lifecycle": self.lifecycle,
+            "can_accept_answers": self.can_accept_answers(),
+            "complete": self.lifecycle == STATE_COMPLETED,
+            "sealed": self.lifecycle == STATE_ABORTED,
+            "aborted": self.lifecycle == STATE_ABORTED,
+            "sealed_reason": self.sealed_reason,
+            "run_closed_because": self.why_no_answers(),
+            "prepared_audio": dict(self.prepared_audio or {}),
+            "run_lock": dict(self.run_lock or {}),
         }
 
     def reset(self) -> None:
-        """New session: new secret, trials and calibration cleared.
+        """New run: new secret, trials and calibration cleared, plan editable.
 
-        The null gate describes the PREPARED AUDIO pair, not the answers, so it
-        survives: resetting trials does not make a broken pair testable.
+        The null gate and the prepared pair describe the RENDERED AUDIO, not
+        the answers, so they survive: resetting trials does not make a broken
+        pair testable. The lifecycle returns to `configured` because this is a
+        new experiment, planned from scratch -- a sealed run stays sealed in
+        the file it exported, it does not haunt the next one.
         """
         self.trials = []
         self.canary_trial = None
         self._pending = None
         self._secret = secrets.token_bytes(32)
+        self.lifecycle = STATE_CONFIGURED
+        self.run_lock = None
+        self.sealed_reason = None
+        self.sealed_at_utc = None
+        self.completed_at_utc = None
 
     # ── serialization ───────────────────────────────────────────────────────
     def to_dict(self) -> Dict[str, Any]:
@@ -535,6 +905,13 @@ class ABXEngine:
             "label_mode": self.label_mode,
             "alpha": self.alpha,
             "canary_enabled": self.canary_enabled,
+            "lifecycle": self.lifecycle,
+            "complete": self.lifecycle == STATE_COMPLETED,
+            "sealed": self.lifecycle == STATE_ABORTED,
+            "sealed_reason": self.sealed_reason,
+            "can_accept_answers": self.can_accept_answers(),
+            "run_lock": dict(self.run_lock or {}),
+            "prepared_audio": dict(self.prepared_audio or {}),
             "trials": [t.to_dict() for t in self.all_trials()],
             "stats": self.stats(),
             "gates": self.gates(),

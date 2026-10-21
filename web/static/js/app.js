@@ -45,6 +45,20 @@ const state = {
     canaryTrial: false,
     buffersIdenticalFromServer: false,
     gates: null,
+    // Study lifecycle, and all of it is the server's call. `canAcceptAnswers`
+    // comes from core: false when N is reached, when the run was sealed, or
+    // when a validity gate closed. The client stops advancing on it, but the
+    // backend refuses the trial too -- a disabled button is a courtesy, never
+    // the rule.
+    lifecycle: "configured",
+    canAcceptAnswers: true,
+    // The A/B buffers are cached per trial, keyed on (prepared audio, canary
+    // mode, this trial's display mapping). A/B audio is served THROUGH the
+    // trial's mapping, so in blind mode a swapped trial is a different pair of
+    // bytes and the cache has to miss. The mapping is public by design (the UI
+    // needs it to draw the buttons); X is not, and never arrives here.
+    bufferCacheKey: null,
+    preparedAudioId: null,
     // Auto-advance: keep audio playing after answer and auto-start next trial
     autoAdvanceEnabled: true,
     // Scrub state tracking — prevents animation from fighting user drag
@@ -107,11 +121,24 @@ const translations = {
         null_gate_not_applicable: "not applicable (pair is meant to differ)",
         null_gate_not_measured: "not measured",
         verdict_void: "VOID — a validity gate failed",
+        verdict_sealed: "SEALED — stopped early, not a result",
         verdict_final: "FINAL",
         verdict_provisional: "provisional",
         verdict_none: "no registered N",
         gate_banner_void: "This run is VOID: ",
         gate_banner_blocked: "Trials are blocked: ",
+        // Study lifecycle: a run ends at the pre-registered N, or when it is
+        // sealed. Neither is "keep going", and only the first is a result.
+        run_complete_banner: (n, k) => `Run complete: N=${n} reached (${k} answered). No further trials — export the result, or reset for a new run.`,
+        run_sealed_banner: "Run sealed: stopped early. Auditable, and NOT a result — the export says so.",
+        run_gate_banner: "A validity gate is closed: no further trials. The run is void — fix the chain and start a new run.",
+        run_no_audio_banner: "No prepared audio pair: run Preprocess & Validate before trials.",
+        seal_run_btn: "⏹ End run now (seal)",
+        seal_run_prompt: "Sealing stops the run for good: the export becomes verifiable and is labelled a sealed partial run, never a result. Why are you stopping?",
+        seal_run_done: "Run sealed. Export it now: the file carries the secret and says it is not a result.",
+        export_redacted_note: "Exporting mid-run: the file is REDACTED (no secret), because the secret gives away X for the trials still to come. Finish N, or seal the run, for a verifiable export.",
+        config_frozen_alert: "The configuration is frozen while this run is under way. Seal the run (auditable, not a result) or reset it before changing N, the pipelines, the label mode or the calibration trial.",
+        start_new_run_confirm: "This run is closed (N reached, or sealed). Its configuration is history. Start a NEW run over the same rendered pair? The closed run stays exactly as its export describes it.",
         canary_feedback_pass: "✓ Calibration passed — your chain works. ",
         canary_feedback_fail: "✕ Calibration FAILED — the run is void. Check the output device and volume, then start a new session. ",
         export_json_btn: "Export JSON",
@@ -170,11 +197,24 @@ const translations = {
         null_gate_not_applicable: "không áp dụng (cặp A/B cố ý khác nhau)",
         null_gate_not_measured: "chưa đo",
         verdict_void: "VÔ HIỆU — một cổng kiểm định đã trượt",
+        verdict_sealed: "ĐÓNG — dừng sớm, không phải kết quả",
         verdict_final: "CHỐT",
         verdict_provisional: "tạm thời",
         verdict_none: "chưa đăng ký N",
         gate_banner_void: "Phiên này VÔ HIỆU: ",
         gate_banner_blocked: "Không được bắt đầu lượt thử: ",
+        // Vòng đời phiên thử: phiên kết thúc ở N đã đăng ký, hoặc khi bị đóng.
+        // Cả hai đều không phải "làm tiếp", và chỉ phiên đầu là kết quả.
+        run_complete_banner: (n, k) => `Phiên đã hoàn tất: đạt N=${n} (${k} lượt trả lời). Không còn lượt thử — hãy xuất kết quả, hoặc reset để bắt đầu phiên mới.`,
+        run_sealed_banner: "Phiên đã đóng: dừng sớm. Có thể kiểm chứng, và KHÔNG phải kết quả — tệp xuất ghi rõ điều đó.",
+        run_gate_banner: "Cánh cổng kiểm định hiệu lực đã đóng: không còn lượt thử. Phiên này vô hiệu — hãy sửa chuỗi phát và bắt đầu phiên mới.",
+        run_no_audio_banner: "Chưa có cặp âm thanh đã rendering: hãy chạy Preprocess & Validate trước khi vào lượt thử.",
+        seal_run_btn: "⏹ Kết thúc phiên ngay (đóng)",
+        seal_run_prompt: "Đóng phiên sẽ dừng hẳn: tệp xuất trở nên kiểm chứng được và bị đánh dấu là phiên dở dang, không bao giờ là kết quả. Lý do dừng?",
+        seal_run_done: "Phiên đã đóng. Hãy xuất ngay: tệp mang theo secret và ghi rõ đây không phải kết quả.",
+        export_redacted_note: "Xuất giữa phiên: tệp bị CHE GIẤU (không có secret), vì secret sẽ tiết lộ X của các lượt thử còn lại. Hãy chạy đủ N, hoặc đóng phiên, để có tệp kiểm chứng được.",
+        config_frozen_alert: "Cấu hình đã bị đóng băng khi phiên đang chạy. Hãy đóng phiên (kiểm chứng được, không phải kết quả) hoặc reset trước khi đổi N, pipeline, chế độ nhãn hay lượt thử hiệu chuẩn.",
+        start_new_run_confirm: "Phiên này đã đóng (đã đạt N, hoặc đã bị đóng). Cấu hình của nó thuộc về quá khứ. Bắt đầu một phiên MỚI trên cùng cặp âm thanh đã rendering? Phiên đã đóng giữ nguyên đúng như tệp xuất của nó mô tả.",
         canary_feedback_pass: "✓ Hiệu chuẩn đạt — chuỗi phát của bạn hoạt động tốt. ",
         canary_feedback_fail: "✕ Hiệu chuẩn TRƯỢT — phiên bị vô hiệu. Hãy kiểm tra thiết bị phát và âm lượng, rồi bắt đầu phiên mới. ",
         export_json_btn: "Xuất JSON",
@@ -454,20 +494,50 @@ async function startPreprocess() {
         })(),
     };
 
+    const postConfig = () => api("/api/config", {
+        method: "POST",
+        body: JSON.stringify(config),
+        headers: { "Content-Type": "application/json" },
+    });
+
     try {
-        await api("/api/config", { method: "POST", body: JSON.stringify(config), headers: { "Content-Type": "application/json" } });
+        try {
+            await postConfig();
+        } catch (e) {
+            // A run under way freezes the plan: N, the pipelines, the label mode
+            // and the calibration switch ARE the experiment, and editing them
+            // under answers already collected is redrawing the study after
+            // seeing the data.
+            if (e.status === 409 && e.payload && (e.payload.sealed || e.payload.complete)) {
+                // The run is CLOSED: N reached, or sealed early. Its
+                // configuration is history and its answers belong to it, so the
+                // only honest way to change it is a NEW run. The finished run
+                // stays exactly as its export describes it; resetting the
+                // session starts a fresh plan over the same rendered pair.
+                if (!window.confirm(t("start_new_run_confirm"))) throw e;
+                await api("/api/trial/reset", { method: "POST" });
+                state.preparedAudioId = null;
+                state.bufferCacheKey = null;
+                await postConfig();
+            } else {
+                throw e;
+            }
+        }
         await api("/api/preprocess", { method: "POST" });
-
-        // Show progress area
-        document.getElementById("progressArea").classList.remove("hidden");
-        document.getElementById("btnPreprocess").classList.add("hidden");
-        document.getElementById("btnCancelPreprocess").classList.remove("hidden");
-
-        // Start polling
-        state.pollInterval = setInterval(pollPreprocessStatus, 500);
     } catch (e) {
-        alert(`Preprocess error: ${e.message}`);
+        alert(e.status === 409
+            ? `${t("config_frozen_alert")}\n\n${e.message}\n${(e.payload && e.payload.reasons || []).join("\n")}`
+            : `Preprocess error: ${e.message}`);
+        return;
     }
+
+    // Show progress area
+    document.getElementById("progressArea").classList.remove("hidden");
+    document.getElementById("btnPreprocess").classList.add("hidden");
+    document.getElementById("btnCancelPreprocess").classList.remove("hidden");
+
+    // Start polling
+    state.pollInterval = setInterval(pollPreprocessStatus, 500);
 }
 
 function collectStages(side) {
@@ -555,9 +625,14 @@ function resetPlaybackForNewPreprocess() {
     state.playbackOffset = 0;
     state.pausePosition = 0;
 
-    // Clear cached buffers so new audio is loaded fresh
+    // Clear cached buffers so new audio is loaded fresh, and drop the cache
+    // key with them: a re-render is a new prepared-audio identity, so no
+    // buffer held here may be reused for it.
     state.bufferA = null;
     state.bufferB = null;
+    state.bufferX = null;
+    state.bufferCacheKey = null;
+    state.preparedAudioId = null;
 
     // Reset scrubber to position 0
     const slider = document.getElementById("scrubSlider");
@@ -601,6 +676,9 @@ async function loadAudioInfo() {
 
         const info = await api("/api/audio/info");
         state.audioDuration = info.duration_seconds;
+        // Identity of the rendered pair, which the buffer cache is keyed on:
+        // when this changes, every decoded buffer the client holds is stale.
+        state.preparedAudioId = info.prepared_audio_id || null;
         document.getElementById("scrubSlider").max = Math.round(state.audioDuration * 10);
         updateScrubber();
 
@@ -615,6 +693,8 @@ async function loadAudioInfo() {
             preloadBuffer("a"),
             preloadBuffer("b"),
         ]);
+        // These bytes belong to the trial in flight, under its mapping.
+        state.bufferCacheKey = bufferCacheKey(info.display_mapping);
 
         // Check if A and B are identical (same codec config, noop passthrough, etc.)
         // If so, share a single buffer for zero-perception difference
@@ -633,14 +713,60 @@ async function loadAudioInfo() {
 }
 
 /**
+ * Cache key for the decoded A/B buffers.
+ *
+ * The server serves the audio of a DISPLAY label through that trial's display
+ * mapping, so in blind mode a swapped trial is a different pair of bytes under
+ * the same button names. Keying on (rendered pair, calibration mode, mapping)
+ * keeps the instant A/B switching of fixed mode -- where the mapping never
+ * changes -- and misses exactly when a refetch is required.
+ */
+function bufferCacheKey(mapping) {
+    const map = mapping
+        ? `${mapping.A || "?"}${mapping.B || "?"}`
+        : "none";
+    return `${state.preparedAudioId || "audio"}|${state.canaryTrial ? "cal" : "pair"}|${map}`;
+}
+
+/**
+ * Make sure the decoded A/B buffers are the ones for THIS trial, then load X.
+ *
+ * One function owns it, because the three facts that decide it arrive
+ * together: the trial's display mapping, whether this is the calibration
+ * pair, and the identity of the rendered audio. A/B never get remapped here:
+ * the client plays the bytes the server served for the label it asked for.
+ */
+async function ensureTrialBuffers(token, mapping) {
+    const key = bufferCacheKey(mapping);
+    const fresh = state.bufferCacheKey === key && state.bufferA && state.bufferB;
+    if (!fresh) {
+        state.bufferA = null;
+        state.bufferB = null;
+        try {
+            await Promise.all([
+                preloadBuffer("a", token),
+                preloadBuffer("b", token),
+            ]);
+        } catch (e) {
+            console.error("A/B buffer reload failed:", e);
+        }
+        state.bufferCacheKey = key;
+    }
+    if (state.buffersIdentical && state.bufferA) state.bufferB = state.bufferA;
+}
+
+/**
  * Fetch and decode a single audio buffer from the server.
  */
 async function preloadBuffer(side, token) {
     // 'x' resolves server-side from the trial token: the client asks for
     // "the X audio" and gets bytes, never an A/B identity.
+    // 'a'/'b' carry the token too: their bytes are resolved through that
+    // trial's display mapping, so the request has to name the trial.
+    const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
     const url = side === "x"
         ? `/api/audio/x?token=${encodeURIComponent(token || "")}`
-        : `/api/audio/${side}`;
+        : `/api/audio/${side}${tokenQuery}`;
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`audio ${side}: HTTP ${resp.status}`);
     const arrayBuf = await resp.arrayBuffer();
@@ -1126,14 +1252,21 @@ async function startNewTrial() {
         state.currentTrialKind = stats.current_trial_kind || "normal";
 
         // A calibration trial plays a DIFFERENT pair of files (the pristine
-        // sample and its deliberately degraded copy). Entering or leaving
-        // that mode refetches A and B; the client asks for "A" and "B" the
-        // same way in both modes and never learns which is which.
-        await setCanaryMode(state.currentTrialKind === "canary");
+        // sample and its deliberately degraded copy), and every trial's A/B
+        // bytes are served through that trial's display mapping. The client
+        // asks for "A" and "B" the same way in every mode, plays the bytes it
+        // is given, and applies no mapping of its own -- mapping twice inverts
+        // it, which is the bug this path used to have.
+        state.canaryTrial = state.currentTrialKind === "canary";
+        const badge = document.getElementById("canaryBadge");
+        if (badge) badge.classList.toggle("hidden", !state.canaryTrial);
+        state.buffersIdentical =
+            !state.canaryTrial && Boolean(state.buffersIdenticalFromServer);
 
-        // The plan carries a token, not an answer. Refetch X audio so the
-        // play button emits this trial's X.
+        // The plan carries a token, not an answer. Refetch A/B and X for THIS
+        // trial (cached while audio, mode and mapping are unchanged).
         state.xToken = trialInfo.token || null;
+        await ensureTrialBuffers(state.xToken, trialInfo.display_mapping);
         try {
             await preloadBuffer("x", state.xToken);
         } catch (e) {
@@ -1147,9 +1280,12 @@ async function startNewTrial() {
         document.getElementById("trialFeedback").classList.add("hidden");
     } catch (e) {
         if (e.status === 409) {
-            // A validity gate is shut. The engine owns that decision; show the
-            // reasons it gave and stop, so nobody answers trials of a void run.
+            // The engine refused the trial: a validity gate is shut, N has been
+            // answered, the run was sealed, or there is no prepared pair. The
+            // engine owns that decision; show the reasons it gave and stop, so
+            // nobody answers trials of a finished or void run.
             showGateBanner(e.payload);
+            applyRunState(e.payload && e.payload.stats ? e.payload.stats : null);
             updateStatsDisplay();
         }
         console.error("Trial start error:", e);
@@ -1157,28 +1293,74 @@ async function startNewTrial() {
 }
 
 /**
- * Enter/leave calibration-trial mode: badge, buffer sharing, A/B refetch.
+ * Adopt the server's lifecycle state: it decides whether the UI advances.
+ *
+ * `can_accept_answers` is core's answer, and the backend refuses a trial the
+ * same way, so disabling these buttons is a courtesy to the listener, never
+ * the rule that bounds the run.
  */
-async function setCanaryMode(on) {
-    const changed = state.canaryTrial !== on;
-    state.canaryTrial = on;
-    const badge = document.getElementById("canaryBadge");
-    if (badge) badge.classList.toggle("hidden", !on);
+function applyRunState(s) {
+    if (!s) return;
+    state.statsMeta = s;
+    state.lifecycle = s.lifecycle || "configured";
+    state.canAcceptAnswers = s.can_accept_answers !== false;
+    state.totalTrials = s.total_trials;
+    state.correctTrials = s.correct_trials;
 
-    state.buffersIdentical = on ? false : Boolean(state.buffersIdenticalFromServer);
-    if (!changed) {
-        if (state.buffersIdentical && state.bufferA) state.bufferB = state.bufferA;
+    for (const id of ["btnAnswerA", "btnAnswerB", "btnNextTrial"]) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !state.canAcceptAnswers;
+    }
+    showRunBanner(s);
+}
+
+/**
+ * Say, out loud, why there are no more trials -- the three endings are three
+ * different actions for the listener, so they get three sentences.
+ */
+function showRunBanner(s) {
+    const el = document.getElementById("runBanner");
+    const text = document.getElementById("runBannerText");
+    if (!el || !text) return;
+    if (s.can_accept_answers !== false) {
+        el.classList.add("hidden");
         return;
     }
-
-    state.bufferA = null;
-    state.bufferB = null;
-    try {
-        await Promise.all([preloadBuffer("a"), preloadBuffer("b")]);
-    } catch (e) {
-        console.error("A/B buffer reload failed:", e);
+    if (s.sealed === true || s.lifecycle === "aborted") {
+        text.textContent = t("run_sealed_banner");
+    } else if (s.canary && s.canary.status === "failed") {
+        text.textContent = t("run_gate_banner");
+    } else if (s.lifecycle === "completed") {
+        text.textContent = t("run_complete_banner", s.planned_trials, s.total_trials);
+    } else {
+        text.textContent = ((s.run_closed_because || []).join("; "))
+            || t("run_gate_banner");
     }
-    if (state.buffersIdentical && state.bufferA) state.bufferB = state.bufferA;
+    el.classList.remove("hidden");
+}
+
+/**
+ * End the run on purpose, so an early export can be honest.
+ *
+ * Exporting while answers are due is REDACTED by design: the secret derives X
+ * for every trial not yet answered. Sealing closes the run, which releases the
+ * key and labels the run a sealed partial run -- auditable, never a result.
+ */
+async function sealRun() {
+    const reason = window.prompt(t("seal_run_prompt"), "");
+    if (reason === null) return;
+    try {
+        const result = await api("/api/trial/seal", {
+            method: "POST",
+            body: JSON.stringify({ reason: reason || "sealed by the tester" }),
+            headers: { "Content-Type": "application/json" },
+        });
+        applyRunState(result.stats);
+        updateStatsDisplay();
+        exportJSON();
+    } catch (e) {
+        alert(`Seal error: ${e.message}`);
+    }
 }
 
 function showGateBanner(payload) {
@@ -1211,9 +1393,16 @@ async function submitAnswer(answer) {
         const textEl = document.getElementById("feedbackText");
 
         updateStatsDisplay();
+        // The server's lifecycle decides what happens next: this answer may be
+        // the one that completed the pre-registered N, or closed the run.
+        applyRunState(result.stats);
 
-        // Auto-advance: start next trial immediately, keep audio playing
-        if (state.autoAdvanceEnabled) {
+        // Auto-advance, bounded by the run. Auto-starting a trial past N would
+        // only earn a 409, and letting a study "continue" past the registered
+        // count is the optional-stopping affordance the whole design exists
+        // to close -- so the bound is enforced in core, and the UI obeys it.
+        const runOver = result.stats && result.stats.can_accept_answers === false;
+        if (state.autoAdvanceEnabled && !runOver) {
             // If currently playing X, switch to the new X automatically so audio keeps flowing
             if (state.isPlaying && state.currentSide === "x") {
                 const buffer = getBufferForSide("x");
@@ -1305,6 +1494,7 @@ function updateStatsDisplay() {
     api("/api/trial/stats").then(s => {
         state.statsMeta = s;
         state.gates = s.gates || null;
+        applyRunState(s);
         const el = document.getElementById("statPValue");
         const p = s.p_value_one_tailed.toFixed(5);
         if (!s.planned_trials) {
@@ -1364,6 +1554,11 @@ function renderGates(s) {
 
     if (s.void) {
         verdictEl.textContent = t("verdict_void");
+        verdictEl.className = "incorrect";
+    } else if (s.sealed) {
+        // A run stopped early is auditable and is NOT a result: the panel says
+        // so in the same words the export uses.
+        verdictEl.textContent = t("verdict_sealed");
         verdictEl.className = "incorrect";
     } else {
         verdictEl.className = "";

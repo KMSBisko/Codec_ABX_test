@@ -10,7 +10,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc libffi-dev && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements-web.txt .
+COPY requirements-web.txt requirements-audio.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements-web.txt
 
 # ── STAGE 2: Runtime ─────────────────────────────────────────────
@@ -29,6 +29,7 @@ RUN apt-get update && \
 # Copy application code
 COPY web/ ./web/
 COPY app/ ./app/
+COPY core/ ./core/
 
 # Create runtime directories
 RUN mkdir -p /app/web/uploads /app/web/sessions

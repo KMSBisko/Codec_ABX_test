@@ -23,6 +23,7 @@ DEFAULT_LABELS: Dict[str, str] = {
     "diag_resample_engine": "Resample engine",
     "diag_canary": "Calibration (canary) trial",
     "diag_run_void": "RUN VOID",
+    "diag_run_sealed": "RUN SEALED (stopped early)",
     "diag_note": "NOTE",
     "diag_verdict": "Verdict",
     "diag_no_planned_n": (
@@ -199,9 +200,16 @@ def validity_lines(
 
     if stats:
         if stats.get("planned_trials"):
-            state = "VOID" if void_reason else (
-                "FINAL" if stats.get("is_final") else "PROVISIONAL"
-            )
+            # Lifecycle beats arithmetic: a run stopped early is SEALED, not
+            # FINAL, whatever its p-value looks like at the partial n.
+            if void_reason:
+                state = "VOID"
+            elif stats.get("sealed"):
+                state = "SEALED"
+            elif stats.get("is_final"):
+                state = "FINAL"
+            else:
+                state = "PROVISIONAL"
             ci = stats.get("ability_ci95") or [0.0, 1.0]
             lines.append(
                 f"{tr('diag_verdict')}: {state} at N={stats['planned_trials']}, "
@@ -210,6 +218,12 @@ def validity_lines(
             )
         else:
             lines.append(tr("diag_no_planned_n"))
+        if stats.get("sealed"):
+            lines.append(
+                f"{tr('diag_run_sealed')}: stopped at n="
+                f"{stats.get('total_trials', '?')} of the pre-registered "
+                "plan: auditable, not a result"
+            )
         if void_reason:
             lines.append(f"{tr('diag_run_void')}: {void_reason}")
 

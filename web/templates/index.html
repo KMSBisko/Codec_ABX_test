@@ -162,6 +162,15 @@
                 <span data-i18n="canary_badge">CALIBRATION TRIAL — known answer, deliberately easy, not counted in the statistics</span>
             </div>
 
+            <!-- Run lifecycle. The backend stops accepting answers at the
+                 pre-registered N, when the run is sealed, and when a gate
+                 closes; this banner says which of the three happened, and the
+                 answer buttons are disabled to match. A courtesy: the rule is
+                 enforced in core, not by these controls. -->
+            <div id="runBanner" class="validation-result hidden">
+                <span id="runBannerText"></span>
+            </div>
+
             <!-- Audio Buttons -->
             <div class="audio-buttons">
                 <button id="btnPlayPause" class="btn btn-audio btn-play-pause" onclick="togglePlayPause()" title="Play/Pause (Space)">▶/⏸</button>
@@ -214,10 +223,16 @@
                 </table>
             </div>
 
-            <!-- Export -->
+            <!-- Export. An export is ALWAYS available, including for a void run
+                 and one stopped early. What it may not do is present a run that
+                 is not over as if it were: while answers are still due the
+                 secret is withheld (it derives X for the trials to come), so
+                 the honest early export needs the run sealed first. -->
             <div class="export-area">
                 <button class="btn" onclick="exportJSON()" data-i18n="export_json_btn">Export JSON</button>
                 <button class="btn" onclick="exportCSV()" data-i18n="export_csv_btn">Export CSV</button>
+                <button class="btn btn-warning" onclick="sealRun()" data-i18n="seal_run_btn">⏹ End run now (seal)</button>
+                <span class="hint" data-i18n="export_redacted_note">Exporting mid-run: the file is REDACTED (no secret), because the secret gives away X for the trials still to come. Finish N, or seal the run, for a verifiable export.</span>
             </div>
         </section>
 

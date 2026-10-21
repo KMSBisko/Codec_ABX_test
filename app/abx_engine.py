@@ -32,6 +32,8 @@ from core.abx import (  # noqa: E402
     LABEL_MODE_FIXED,
     TRIAL_KIND_CANARY,
     ABXEngine as CoreEngine,
+    ConfigLocked,
+    StudyLifecycleError,
     TrialGateClosed,
 )
 from core.stats import min_correct_for_significance  # noqa: E402
@@ -57,6 +59,20 @@ class ABXStats:
     canary_status: str = "not_configured"
     null_gate_status: str = "not_measured"
     current_trial_kind: str = "normal"
+    # Study lifecycle. `significant` is raw arithmetic; the GUI says "pass"
+    # only off `significant_verdict`, which is arithmetic AND N reached AND a
+    # valid run. `can_accept_answers` is what stops the transport advancing
+    # past N; the engine refuses the trial too, so a frozen button is a
+    # courtesy, not the rule.
+    significant_verdict: bool = False
+    lifecycle: str = "configured"
+    can_accept_answers: bool = True
+    complete: bool = False
+    sealed: bool = False
+    # Why the run is closed, in core's words: a status bar, the export and the
+    # diagnostics panel all read these, so no shell invents its own excuse.
+    sealed_reason: Optional[str] = None
+    run_closed_because: Optional[list] = None
 
     @property
     def p_value_text(self) -> str:
@@ -64,6 +80,9 @@ class ABXStats:
         if self.void:
             # Significance is not a verdict once a validity gate has failed.
             return f"p: {self.p_value_one_tailed:.4f} (VOID: run invalid)"
+        if self.sealed:
+            # A sealed partial run has no verdict to compute.
+            return f"p: {self.p_value_one_tailed:.4f} (ABORTED: run sealed, not a result)"
         if self.total_trials == 0:
             return "p: -"
         if self.provisional:
@@ -75,11 +94,17 @@ class ABXStats:
 class ABXEngine:
     """Shim: canonical engine + the display-label surface the GUI expects.
 
-    The GUI expects `new_trial()` to always stage a playable trial. Validity
-    gates break that expectation on purpose, so the shim absorbs the
-    difference: a closed gate is recorded in `gate_closed` (plain text, ready
-    for a dialog) instead of propagating, and the caller checks `gate_open`.
-    One rule, so the desktop cannot drift into offering trials the web refuses.
+    The GUI expects `new_trial()` to always stage a playable trial. The
+    engine's rules break that expectation on purpose, so the shim absorbs the
+    difference in ONE way for every refusal:
+
+      * a closed validity gate is recorded in `gate_closed`
+      * a run that reached N, or was sealed, is recorded in `run_complete`
+      * a refused plan edit is recorded in `config_locked`
+
+    all as plain text for a status bar or dialog, never as an exception
+    travelling through a Qt slot. One rule, so the desktop cannot drift into
+    offering trials the web refuses, and so no shell can offer a trial past N.
     """
 
     def __init__(
@@ -98,6 +123,8 @@ class ABXEngine:
         self._kind: str = "normal"
         self._last_answer = None
         self.gate_closed: Optional[str] = None
+        self.run_complete: Optional[str] = None
+        self.config_locked: Optional[str] = None
         self.current_x_is: str = "A"
         self.new_trial()
 
@@ -111,19 +138,74 @@ class ABXEngine:
         return self._core.label_mode
 
     def set_label_mode(self, label_mode: str) -> None:
-        self._core.label_mode = LABEL_MODE_BLIND if label_mode == "blind_random" else LABEL_MODE_FIXED
+        """Frozen during a run: the mapping mode is part of the plan."""
+        try:
+            self._core.set_label_mode(
+                LABEL_MODE_BLIND if label_mode == "blind_random" else LABEL_MODE_FIXED
+            )
+            self.config_locked = None
+        except ConfigLocked as exc:
+            self.config_locked = str(exc)
 
     @property
     def planned_trials(self) -> Optional[int]:
         return self._core.planned_trials
 
     def set_planned_trials(self, n: Optional[int]) -> None:
-        self._core.planned_trials = n
+        """Pre-register N. Refused mid-run, recorded as text for the GUI."""
+        try:
+            self._core.set_planned_trials(n)
+            self.config_locked = None
+        except ConfigLocked as exc:
+            self.config_locked = str(exc)
+        except ValueError as exc:
+            self.config_locked = str(exc)
 
     @property
     def threshold(self) -> Optional[int]:
         n = self._core.planned_trials
         return min_correct_for_significance(n, self._core.alpha) if n else None
+
+    # ── study lifecycle (shared with the web shell through core) ────────────
+    @property
+    def lifecycle(self) -> str:
+        return self._core.lifecycle
+
+    def can_accept_answers(self) -> bool:
+        return self._core.can_accept_answers()
+
+    def run_under_way(self) -> bool:
+        """A trial is staged or answered: the plan is frozen from here."""
+        return self._core.run_under_way()
+
+    def can_edit_config(self) -> bool:
+        """Whether the UI may rebuild/replan the engine at all."""
+        return not self._core.run_under_way()
+
+    def set_prepared_audio(self, identity: str, **details) -> None:
+        """Record the rendered pair this run is locked to (frozen in a run)."""
+        self._core.set_prepared_audio(identity, **details)
+
+    @property
+    def prepared_audio(self) -> Optional[dict]:
+        """The audio identity this run is locked to, for the export."""
+        return self._core.prepared_audio
+
+    @property
+    def run_lock(self) -> Optional[dict]:
+        """The plan snapshot taken when the run started."""
+        return self._core.run_lock
+
+    def seal(self, reason: Optional[str] = None) -> dict:
+        """End the run now: auditable, never a result, no further answers."""
+        result = self._core.abort(reason)
+        self._pending_source = None
+        self._kind = "normal"
+        self.run_complete = "; ".join(self._core.why_no_answers())
+        return result
+
+    def abort(self, reason: Optional[str] = None) -> dict:
+        return self.seal(reason)
 
     # ── validity gates ──────────────────────────────────────────────────────
     @property
@@ -167,23 +249,40 @@ class ABXEngine:
 
     # ── trial lifecycle ─────────────────────────────────────────────────────
     def new_trial(self) -> str:
-        """Stage the next trial. Never raises: a closed gate is recorded."""
+        """Stage the next trial. Never raises: a refusal is recorded as text.
+
+        The engine refuses a trial for three reasons -- a closed validity gate,
+        a run that reached its pre-registered N, a sealed run -- and the GUI
+        must show each in its own words, because the actions they invite are
+        different (fix the chain / export the finished run / start a new one).
+        """
         try:
             plan = self._core.new_trial()
         except TrialGateClosed as exc:
             self.gate_closed = "; ".join(exc.reasons)
-            self._pending_source = None
-            self._mapping = {"A": "A", "B": "B"}
-            self._kind = "normal"
-            self.current_x_is = "A"
+            self._clear_staged_trial()
+            return self.current_x_is
+        except StudyLifecycleError as exc:
+            # Run complete, or sealed: no trial, and the reason is the message.
+            self.gate_closed = None
+            self.run_complete = "; ".join(exc.reasons) or str(exc)
+            self._clear_staged_trial()
             return self.current_x_is
 
         self.gate_closed = None
+        self.run_complete = None
         self._mapping = dict(plan.display_mapping)
         self._pending_source = plan.x_source
         self._kind = plan.kind
         self.current_x_is = plan.x_display_label()
         return self.current_x_is
+
+    def _clear_staged_trial(self) -> None:
+        """No trial in flight: the UI must not offer an answer for one."""
+        self._pending_source = None
+        self._mapping = {"A": "A", "B": "B"}
+        self._kind = "normal"
+        self.current_x_is = "A"
 
     def submit_answer(self, answer: str) -> bool:
         trial = self._core.submit_answer(answer)
@@ -203,6 +302,8 @@ class ABXEngine:
     def reset(self) -> None:
         self._core.reset()
         self._last_answer = None
+        self.run_complete = None
+        self.config_locked = None
         self.new_trial()
 
     # ── audit / verifiability ───────────────────────────────────────────────
@@ -215,7 +316,13 @@ class ABXEngine:
         return self._pending_source or "A"
 
     def reveal(self) -> dict:
+        """The commit-reveal block. Redacted while the run can still answer."""
         return self._core.reveal()
+
+    @property
+    def export_is_redacted(self) -> bool:
+        """True when the export cannot carry the secret: answers still due."""
+        return bool(self._core.reveal().get("redacted"))
 
     @property
     def session_commitment(self) -> str:
@@ -240,4 +347,11 @@ class ABXEngine:
             canary_status=str(raw["canary_status"]),
             null_gate_status=str(raw["null_gate"]["status"]),
             current_trial_kind=str(raw["current_trial_kind"]),
+            significant_verdict=bool(raw["significant_verdict"]),
+            lifecycle=str(raw["lifecycle"]),
+            can_accept_answers=bool(raw["can_accept_answers"]),
+            complete=bool(raw["complete"]),
+            sealed=bool(raw["sealed"]),
+            sealed_reason=raw["sealed_reason"],
+            run_closed_because=list(raw["run_closed_because"] or []),
         )

@@ -14,9 +14,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+import hashlib
 import math
 import os
-import random
 import shutil
 import subprocess
 import tempfile
@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 from flask import (
     Flask,
     jsonify,
@@ -52,17 +51,9 @@ from core.abx import (
     LABEL_MODE_FIXED,
     TRIAL_KIND_CANARY,
     ABXEngine as CoreABXEngine,
+    StudyLifecycleError,
     TrialGateClosed,
 )
-from core.alignment import (
-    align_pair,
-    canary_audio_check,
-    estimate_lag,
-    identical_pipeline_config,
-    null_depth_db,
-    null_gate_decision,
-)
-from core.canary import degrade_for_canary
 from core.report import canary_report_block, validity_lines
 
 # ── Flask App Setup ──────────────────────────────────────────────────────────
@@ -111,6 +102,7 @@ class SessionState:
         # Null pair gate decision for the prepared pair (core.alignment)
         self.null_gate: Dict[str, Any] = {}
         # Preprocessing
+        self.active_pipeline = None
         self.preprocess_running = False
         self.preprocess_cancelled = False
         self.preprocess_phase = ""
@@ -121,6 +113,16 @@ class SessionState:
         # Processed audio paths (final aligned, normalized A and B WAVs)
         self.audio_a_path: Optional[str] = None
         self.audio_b_path: Optional[str] = None
+        # Identity of the rendered pair: a digest of the two delivered WAVs plus
+        # the fingerprint of the configuration that rendered them. A run is
+        # locked to it, the browser caches its decoded buffers against it, and
+        # a configuration change that no longer matches it invalidates the pair
+        # -- so a verdict can never be printed over audio the listener did not
+        # hear. `prepared_config_fingerprint` is what the next config POST is
+        # compared against.
+        self.prepared_audio: Dict[str, Any] = {}
+        self.prepared_config_fingerprint: Optional[str] = None
+        self.stale_audio_reason: Optional[str] = None
         # Session metadata for diagnostics
         self.session_metadata: Dict[str, Any] = {}
         # ABX Engine state (canonical engine from core.abx -- shared with the
@@ -137,6 +139,65 @@ class SessionState:
         # before the answer was made.
         self.pending_plans: Dict[str, Any] = {}
 
+    # ── configuration: fingerprint, freeze, invalidation ────────────────────
+
+    def config_fingerprint(self) -> str:
+        """Fingerprint of everything that changes the RENDERED pair.
+
+        Plan-only settings (N, label mode) are deliberately not in here:
+        changing them does not make the rendered audio stale. Neither is the
+        calibration switch: it selects an EXTRA pair (the pristine sample and
+        its degraded copy) and does not alter the delivered A/B bytes, so
+        flipping it must not force a re-render of a long pipeline. What the
+        switch needs is a measured calibration pair, which is tracked on
+        `canary_available` and reported by the gate, not on this fingerprint.
+        """
+        payload = {
+            "input_file_path": self.input_file_path,
+            "sample_rate_mode": self.sample_rate_mode.value,
+            "stages_a": [
+                {"codec_id": s.codec_id, "bitrate_kbps": s.bitrate_kbps}
+                for s in self.stages_a
+            ],
+            "stages_b": [
+                {"codec_id": s.codec_id, "bitrate_kbps": s.bitrate_kbps}
+                for s in self.stages_b
+            ],
+            "bandwidth_limit_a_enabled": self.bandwidth_limit_a_enabled,
+            "bandwidth_limit_a_hz": self.bandwidth_limit_a_hz,
+            "bandwidth_limit_b_enabled": self.bandwidth_limit_b_enabled,
+            "bandwidth_limit_b_hz": self.bandwidth_limit_b_hz,
+        }
+        blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()[:16]
+
+    def prepared_pair_ready(self) -> bool:
+        """Is there a rendered pair at all? `prepare` comes before `run`."""
+        return bool(self.audio_a_path and self.audio_b_path)
+
+    def invalidate_prepared_audio(self, reason: str) -> None:
+        """Drop the rendered pair, its gates and the run built on it.
+
+        Called when the configuration changes under a pair that was rendered
+        from the old one. The gates describe the PAIR, so they go with it:
+        keeping a passed null gate from the old pipelines is exactly how a
+        broken pair slips through. The run goes too, because its verdict would
+        describe audio the listener is no longer hearing.
+        """
+        self.audio_a_path = None
+        self.audio_b_path = None
+        self.preprocess_ready = False
+        self.prepared_audio = {}
+        self.prepared_config_fingerprint = None
+        self.stale_audio_reason = reason
+        self.null_gate = {}
+        self.canary_check = {}
+        self.canary_available = True
+        self.canary_pristine_path = None
+        self.canary_degraded_path = None
+        self.session_metadata = {}
+        self.reset_trials()
+
     def configure_engine(self) -> None:
         """(Re)build the engine from the current session configuration."""
         self.engine = CoreABXEngine(
@@ -152,20 +213,49 @@ class SessionState:
             canary_enabled=bool(self.canary_enabled and self.canary_available),
         )
         self.engine.set_null_gate(self.null_gate or None)
+        # The prepared pair belongs to the session, not to an engine instance:
+        # a rebuild keeps the identity the run gets locked to.
+        if self.prepared_audio:
+            self.engine.prepared_audio = dict(self.prepared_audio)
         self.pending_plans.clear()
 
     def reset_trials(self):
-        """Reset ABX trial state."""
+        """Reset ABX trial state: a new run, planned from scratch."""
         self.engine.reset()
         self.configure_engine()
+
+    def seal_run(self, reason: Optional[str] = None) -> Dict[str, Any]:
+        """End the run now: the export becomes auditable, the run is not a result."""
+        result = self.engine.abort(reason)
+        # The trial in flight is void: its audio may have been played and its
+        # answer will never arrive, so it must stop being fetchable.
+        self.pending_plans.clear()
+        stats = self.stats()
+        result["stats"] = stats
+        result["can_accept_answers"] = stats["can_accept_answers"]
+        result["sealed_reason"] = stats["sealed_reason"]
+        result["complete"] = stats["complete"]
+        result["export_is_redacted"] = False  # the key is released with the seal
+        return result
 
     def new_trial(self) -> Dict[str, Any]:
         """Start a new trial. Returns the CLIENT-SAFE plan only.
 
-        Raises core.abx.TrialGateClosed when a validity gate is shut; the
-        endpoint turns that into a 409 so no shell can offer trials the other
-        would refuse.
+        Raises core.abx.TrialGateClosed when a validity gate is shut, and
+        core.abx.StudyLifecycleError when the run has reached N or was sealed;
+        the endpoint turns either into a 409, so no shell can offer trials the
+        other would refuse.
         """
+        if not self.prepared_pair_ready():
+            raise TrialGateClosed(
+                "no prepared audio pair: preprocess the session before running trials"
+                + (f" ({self.stale_audio_reason})" if self.stale_audio_reason else ""),
+                [
+                    "the rendered A/B pair is missing (the configuration "
+                    "changed, or preprocessing has not run): press "
+                    "Preprocess & Validate before running trials"
+                ],
+            )
         plan = self.engine.new_trial()
         self.pending_plans[plan.token] = plan
         # Keep the token table small; only the newest plans are playable.
@@ -181,22 +271,48 @@ class SessionState:
             plan = plans[-1] if plans else None
         return plan
 
+    def _display_source(self, plan, side_label: str) -> str:
+        """Display label -> physical source, applied ONCE, in the serving layer.
+
+        Core scores an answer by resolving the display label through the
+        trial's `display_mapping`, so the audio served under that label has to
+        BE that source's audio. The browser applies no mapping and must not:
+        mapping in two layers inverts it, and the client has no business
+        reasoning about sources at all. So this is the one place a label's
+        audio is chosen. X is the exception by design -- X is a physical side,
+        resolved from `x_source` and never re-mapped.
+        """
+        if plan is None:
+            return side_label
+        return dict(plan.display_mapping).get(side_label, side_label)
+
     def side_audio_path(
         self, side: str, token: Optional[str] = None
     ) -> Optional[str]:
         """Server-side resolution of a/b/x -> an audio path.
 
+        'a' and 'b' are DISPLAY labels: they resolve through the trial's
+        display mapping, the same resolution the scorer uses, so what the
+        listener hears under a label is what an answer under that label means.
+        In blind mode roughly half the trials are swapped, and serving the
+        physical pair here inverted every swapped trial: a perfect listener
+        scored ~50% and the study reported "not significant" about somebody
+        who could hear the difference. See tests/test_web_playback_mapping.py.
+
         During a calibration trial the same three names resolve to the
-        calibration pair (pristine vs grossly degraded) instead of the codec
-        pair. The client asks for "A", "B" and "X" exactly as always, so the
+        calibration pair (pristine vs grossly degraded) under the same
+        mapping. The client asks for "A", "B" and "X" exactly as always, so the
         blinding is unchanged: it never learns which of the two X was.
         """
         plan = self._plan_for(token)
         if plan is not None and plan.kind == TRIAL_KIND_CANARY:
-            if side == "a":
-                return self.canary_pristine_path
-            if side == "b":
-                return self.canary_degraded_path
+            if side in ("a", "b"):
+                source = self._display_source(plan, side.upper())
+                return (
+                    self.canary_pristine_path
+                    if source == "A"
+                    else self.canary_degraded_path
+                )
             if side == "x":
                 return (
                     self.canary_pristine_path
@@ -205,10 +321,9 @@ class SessionState:
                 )
             return None
 
-        if side == "a":
-            return self.audio_a_path
-        if side == "b":
-            return self.audio_b_path
+        if side in ("a", "b"):
+            source = self._display_source(plan, side.upper())
+            return self.audio_a_path if source == "A" else self.audio_b_path
         if side == "x":
             if plan is None:
                 return None
@@ -337,9 +452,15 @@ def upload_file():
 
     # Save file
     safe_name = Path(f.filename).stem[:60] + ext
-    session.input_file_name = f.filename
-    session.input_file_path = os.path.join(UPLOAD_FOLDER, safe_name)
-    f.save(session.input_file_path)
+    with session.lock:
+        if session.preprocess_running or session.engine.run_under_way():
+            return jsonify({"error": "input is locked during preparation or a frozen run"}), 409
+        path = os.path.join(UPLOAD_FOLDER, safe_name)
+        f.save(path)
+        session.input_file_name = f.filename
+        session.input_file_path = path
+        # Re-uploading the same name changes bytes without changing the path.
+        session.invalidate_prepared_audio("input audio replaced; render again")
 
     return jsonify({
         "filename": f.filename,
@@ -351,12 +472,56 @@ def upload_file():
 
 @app.route("/api/config", methods=["POST"])
 def set_config():
-    """Update session configuration."""
+    """Update session configuration.
+
+    Two rules the browser cannot opt out of, both enforced here:
+
+    1. The plan is frozen while a run is under way. A run in progress has a
+       published commitment, playable A/B/X and possibly recorded answers, so
+       re-registering N, flipping the label mode, toggling the calibration
+       trial or re-pointing the pipelines is redrawing the experiment under the
+       data. The edit is refused with 409; the way to change the plan is to
+       seal the run (auditable, not a result) or reset it.
+    2. A material configuration change OUTSIDE a run invalidates the rendered
+       pair. The old WAVs were rendered by the old pipeline and their null gate
+       and calibration material describe that pair, so they are dropped --
+       trials cannot start again until Preprocess & Validate has rendered the
+       pair this configuration describes.
+    """
     data = request.get_json()
     if not data:
         return jsonify({"error": "no JSON body"}), 400
 
     with session.lock:
+        if session.preprocess_running:
+            return jsonify({"error": "configuration is locked during preparation"}), 409
+        engine = session.engine
+        if engine.run_under_way():
+            reasons = [
+                "the run is under way (lifecycle="
+                f"{engine.lifecycle}, scored trials answered="
+                f"{engine.total_trials}, trial in flight="
+                f"{engine.trial_in_flight()}): N, label mapping, calibration "
+                "and the pipelines are frozen until the run finishes",
+                "seal the run for an auditable partial export, or reset it to "
+                "plan a new one",
+            ]
+            return jsonify({
+                "error": (
+                    "configuration is frozen during a run: the plan is fixed "
+                    "before the answers"
+                ),
+                "reasons": reasons,
+                "lifecycle": engine.lifecycle,
+                "sealed": engine.lifecycle == "aborted",
+                "complete": engine.lifecycle == "completed",
+                "can_accept_answers": engine.can_accept_answers(),
+                "gates": engine.gates(),
+                "config": _config_payload(),
+            }), 409
+
+        was_fingerprint = session.prepared_config_fingerprint
+
         # Sample rate mode
         sr_mode = data.get("sample_rate_mode")
         if sr_mode:
@@ -390,42 +555,105 @@ def set_config():
             for s in stages_b_data
         ]
 
-        # Label mode / planned N changed under us: rebuild the engine so the
-        # pre-registration and blinding reflect the new configuration.
-        session.configure_engine()
-
         # Bandwidth limits
         session.bandwidth_limit_a_enabled = data.get("bandwidth_limit_a_enabled", False)
         session.bandwidth_limit_a_hz = data.get("bandwidth_limit_a_hz")
         session.bandwidth_limit_b_enabled = data.get("bandwidth_limit_b_enabled", False)
         session.bandwidth_limit_b_hz = data.get("bandwidth_limit_b_hz")
 
-    return jsonify({"status": "ok"})
+        # A render-affecting change makes the prepared pair stale. Only a pair
+        # that was rendered from a KNOWN configuration can be judged stale, so
+        # a scripted session that only set paths keeps working.
+        invalidated = False
+        if was_fingerprint and session.prepared_pair_ready():
+            new_fingerprint = session.config_fingerprint()
+            if new_fingerprint != was_fingerprint:
+                session.invalidate_prepared_audio(
+                    "configuration changed after the audio was rendered: the "
+                    "delivered pair no longer matches the pipeline it is being "
+                    "compared under"
+                )
+                invalidated = True
+
+        # The calibration switch selects EXTRA material (the pristine sample
+        # and its deliberately degraded copy); it does not change the delivered
+        # A/B bytes, so toggling it must not force a re-render. It does need
+        # that material to exist: a session rendered with calibration off has no
+        # calibration pair, and switching the gate on must not silently promise
+        # a gate that has nothing to measure.
+        if session.canary_enabled and not (
+            session.canary_pristine_path and session.canary_degraded_path
+        ):
+            session.canary_available = False
+        elif not session.canary_enabled:
+            # No gate requested: the flag means "nothing to gate".
+            session.canary_available = True
+
+        # Label mode / planned N changed under us: rebuild the engine so the
+        # pre-registration and blinding reflect the new configuration.
+        session.configure_engine()
+
+        # Say what the new configuration can and cannot do with what is already
+        # rendered, so the browser never starts a trial on audio that has to be
+        # produced first.
+        notes = []
+        if invalidated:
+            notes.append(
+                "the rendered pair was dropped: it does not match this "
+                "configuration. Run Preprocess & Validate before any trial."
+            )
+        if session.canary_enabled and not session.canary_available:
+            notes.append(
+                "calibration trial requested, but there is no usable "
+                "calibration pair for this configuration: the gate reports "
+                "'unavailable' and does not gate the run. Re-run Preprocess & "
+                "Validate with the calibration trial enabled to measure it."
+            )
+
+    return jsonify({
+        "status": "ok",
+        "audio_invalidated": not session.prepared_pair_ready(),
+        "canary_available": bool(session.canary_available),
+        "prepared_audio_id": (session.prepared_audio or {}).get("id"),
+        "config_fingerprint": session.config_fingerprint(),
+        "lifecycle": session.engine.lifecycle,
+        "can_accept_answers": session.engine.can_accept_answers(),
+        "notes": notes,
+    })
+
+
+def _config_payload() -> Dict[str, Any]:
+    """The session configuration, in the shape both GET and the 409 reply use."""
+    return {
+        "sample_rate_mode": session.sample_rate_mode.value,
+        "label_mapping_mode": session.label_mapping_mode.value,
+        "planned_trials": session.planned_trials,
+        "canary_enabled": bool(session.canary_enabled),
+        "canary_available": bool(session.canary_available),
+        "stages_a": [
+            {"codec_id": s.codec_id, "bitrate_kbps": s.bitrate_kbps}
+            for s in session.stages_a
+        ],
+        "stages_b": [
+            {"codec_id": s.codec_id, "bitrate_kbps": s.bitrate_kbps}
+            for s in session.stages_b
+        ],
+        "bandwidth_limit_a_enabled": session.bandwidth_limit_a_enabled,
+        "bandwidth_limit_a_hz": session.bandwidth_limit_a_hz,
+        "bandwidth_limit_b_enabled": session.bandwidth_limit_b_enabled,
+        "bandwidth_limit_b_hz": session.bandwidth_limit_b_hz,
+    }
 
 
 @app.route("/api/config", methods=["GET"])
 def get_config():
-    """Return current configuration."""
+    """Return current configuration, and whether it is frozen."""
     with session.lock:
-        return jsonify({
-            "sample_rate_mode": session.sample_rate_mode.value,
-            "label_mapping_mode": session.label_mapping_mode.value,
-            "planned_trials": session.planned_trials,
-            "canary_enabled": bool(session.canary_enabled),
-            "canary_available": bool(session.canary_available),
-            "stages_a": [
-                {"codec_id": s.codec_id, "bitrate_kbps": s.bitrate_kbps}
-                for s in session.stages_a
-            ],
-            "stages_b": [
-                {"codec_id": s.codec_id, "bitrate_kbps": s.bitrate_kbps}
-                for s in session.stages_b
-            ],
-            "bandwidth_limit_a_enabled": session.bandwidth_limit_a_enabled,
-            "bandwidth_limit_a_hz": session.bandwidth_limit_a_hz,
-            "bandwidth_limit_b_enabled": session.bandwidth_limit_b_enabled,
-            "bandwidth_limit_b_hz": session.bandwidth_limit_b_hz,
-        })
+        payload = _config_payload()
+        payload["lifecycle"] = session.engine.lifecycle
+        payload["config_frozen"] = session.engine.run_under_way()
+        payload["can_accept_answers"] = session.engine.can_accept_answers()
+        return jsonify(payload)
 
 
 # ── API: Preprocessing ───────────────────────────────────────────────────────
@@ -440,6 +668,13 @@ def start_preprocess():
         if session.preprocess_running:
             return jsonify({"error": "preprocessing already running"}), 409
 
+        if session.engine.run_under_way():
+            return jsonify({
+                "error": "reset the frozen run explicitly before preparing new audio",
+                "lifecycle": session.engine.lifecycle,
+            }), 409
+
+        session.invalidate_prepared_audio("audio preparation in progress")
         session.preprocess_running = True
         session.preprocess_cancelled = False
         session.preprocess_phase = "starting"
@@ -480,6 +715,9 @@ def cancel_preprocess():
     """Cancel running preprocessing."""
     with session.lock:
         session.preprocess_cancelled = True
+        pipeline = session.active_pipeline
+    if pipeline is not None:
+        pipeline.request_cancel()
     return jsonify({"status": "cancelled"})
 
 
@@ -497,465 +735,184 @@ def _is_cancelled() -> bool:
 
 
 def _run_preprocess():
-    """Background preprocessing pipeline."""
+    """Adapt the shared headless preparation pipeline to the web session.
+
+    DSP dependencies are lazy: API/statistics-only deployments can import the
+    web app without Qt or the audio extras. Rendering requires the audio extras.
+    """
+    pipeline = None
+    work_dir = None
+    published = False
     try:
-        ffmpeg = find_ffmpeg()
-        ffprobe = find_ffprobe()
-        work_dir = tempfile.mkdtemp(prefix="abx_web_")
+        from app.audio_pipeline import AudioPipeline, PipelineCancelled
+        from app.models import PipelineStageConfig as AudioStage, SampleRateMode as AudioRate
 
-        input_path = session.input_file_path
-        if not input_path or not Path(input_path).exists():
-            raise ValueError("Input file not found")
-
-        # ── Phase 1: Input Prep (FLAC -> WAV if needed) ────────────────────
-        _set_phase("input_prep", 5, "Preparing input audio...")
-        working_wav = os.path.join(work_dir, "input.wav")
-        ext = Path(input_path).suffix.lower()
-
-        if ext == ".flac":
-            cmd = [ffmpeg, "-y", "-i", input_path, "-acodec", "pcm_s16le", "-ar", "48000", working_wav]
-        else:
-            # WAV: normalize to pcm_s16le
-            cmd = [ffmpeg, "-y", "-i", input_path, "-acodec", "pcm_s16le", working_wav]
-
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0 and not _is_cancelled():
-            raise RuntimeError(f"Input prep failed: {r.stderr[:200]}")
-
-        # ── Phase 1.5: Probe input for sample rate ─────────────────────────
-        _set_phase("probe", 10, "Probing audio properties...")
-        probe_cmd = [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", working_wav]
-        r = subprocess.run(probe_cmd, capture_output=True, text=True)
-        probe_info = json.loads(r.stdout)
-        audio_stream = None
-        for stream in probe_info.get("streams", []):
-            if stream.get("codec_type") == "audio":
-                audio_stream = stream
-                break
-
-        original_sr = int(audio_stream.get("sample_rate", 48000))
-        duration_str = audio_stream.get("duration", "0")
-        try:
-            duration = float(duration_str)
-        except (ValueError, TypeError):
-            duration = 0.0
-        channels = int(audio_stream.get("channels", 2))
-
-        # Determine target sample rate
-        if session.sample_rate_mode == SampleRateMode.FORCE_48K:
-            target_sr = 48000
-        else:
-            target_sr = original_sr
-
-        resample_engine_used = "none"
-
-        # ── Phase 2: Resample (if FORCE_48K and needed) ────────────────────
-        if session.sample_rate_mode == SampleRateMode.FORCE_48K and original_sr != 48000:
-            _set_phase("resample", 15, f"Resampling {original_sr} -> 48000 Hz...")
-            resampled_wav = os.path.join(work_dir, "input_resampled.wav")
-            cmd = [ffmpeg, "-y", "-i", working_wav, "-acodec", "pcm_s16le",
-                   "-ar", "48000", "-af", "aresample=resampler=soxr", resampled_wav]
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            if r.returncode != 0 and not _is_cancelled():
-                # Fallback without soxr
-                cmd = [ffmpeg, "-y", "-i", working_wav, "-acodec", "pcm_s16le", "-ar", "48000", resampled_wav]
-                r = subprocess.run(cmd, capture_output=True, text=True)
-            working_wav = resampled_wav
-            target_sr = 48000
-            resample_engine_used = "soxr"
-
-        # ── Phase 3: Codec Pipeline (Side A & B) ───────────────────────────
-        catalog = codec_catalog()
-
-        def run_pipeline(stages, side_label, base_progress):
-            _set_phase(f"codec_{side_label}", base_progress, f"Processing Side {side_label} pipeline...")
-            current_input = working_wav
-            stage_results = []
-
-            for idx, stage_cfg in enumerate(stages):
-                if _is_cancelled():
-                    break
-
-                profile = catalog.get(stage_cfg.codec_id)
-                if not profile:
-                    raise ValueError(f"Unknown codec: {stage_cfg.codec_id}")
-
-                # No-op passthrough
-                if profile.pipeline_noop:
-                    stage_results.append({
-                        "stage_index": idx,
-                        "codec_id": profile.codec_id,
-                        "codec_name": profile.display_name,
-                        "bitrate_kbps": 0,
-                    })
-                    continue
-
-                encoded_path = os.path.join(work_dir, f"{side_label}_stage{idx + 1}_enc.{profile.container_ext}")
-                decoded_path = os.path.join(work_dir, f"{side_label}_stage{idx + 1}_dec.wav")
-
-                # Encode
-                enc_cmd = [ffmpeg, "-y", "-i", current_input]
-                if profile.ffmpeg_extra_args:
-                    enc_cmd.extend(profile.ffmpeg_extra_args)
-                enc_cmd.extend([
-                    "-acodec", profile.ffmpeg_encoder,
-                    "-ar", str(target_sr),
-                ])
-
-                # Add bitrate argument
-                if stage_cfg.bitrate_kbps > 0 and not profile.pipeline_noop:
-                    bps = stage_cfg.bitrate_kbps * 1000
-                    enc_cmd.extend(["-b:a", str(bps)])
-
-                enc_cmd.append(encoded_path)
-                r = subprocess.run(enc_cmd, capture_output=True, text=True)
-                if r.returncode != 0:
-                    raise RuntimeError(f"Encode failed for {side_label} stage {idx + 1}: {r.stderr[:200]}")
-
-                # Decode to WAV
-                dec_args = []
-                if profile.ffmpeg_decode_input_format:
-                    dec_args.extend(["-f", profile.ffmpeg_decode_input_format])
-                dec_cmd = [ffmpeg, "-y"] + dec_args + ["-i", encoded_path,
-                            "-acodec", "pcm_s16le", "-ar", str(target_sr), decoded_path]
-                r = subprocess.run(dec_cmd, capture_output=True, text=True)
-                if r.returncode != 0:
-                    raise RuntimeError(f"Decode failed for {side_label} stage {idx + 1}: {r.stderr[:200]}")
-
-                stage_results.append({
-                    "stage_index": idx,
-                    "codec_id": profile.codec_id,
-                    "codec_name": profile.display_name,
-                    "bitrate_kbps": stage_cfg.bitrate_kbps,
-                })
-                current_input = decoded_path
-
-            return current_input, stage_results
-
-        # Process Side A
-        audio_a_final, stages_a_results = run_pipeline(session.stages_a, "A", 30)
-        if _is_cancelled():
-            audio_a_final = os.path.join(work_dir, "a_final.wav")
-            # Copy last stage output as final
-            src = session.stages_b[-1] if session.stages_b else None
-            # Just use the pipeline output we already have
-            pass
-
-        # Process Side B
-        audio_b_final, stages_b_results = run_pipeline(session.stages_b, "B", 55)
-
-        # ── Phase 4: Bandwidth Limit (optional) ────────────────────────────
-        if session.bandwidth_limit_a_enabled and session.bandwidth_limit_a_hz:
-            _set_phase("bw_limit_a", 70, f"Applying {session.bandwidth_limit_a_hz}Hz low-pass to Side A...")
-            bw_out = os.path.join(work_dir, "a_bw_limited.wav")
-            cmd = [ffmpeg, "-y", "-i", audio_a_final,
-                   "-af", f"lowpass=f={session.bandwidth_limit_a_hz}",
-                   "-acodec", "pcm_s16le", bw_out]
-            subprocess.run(cmd, capture_output=True)
-            audio_a_final = bw_out
-
-        if session.bandwidth_limit_b_enabled and session.bandwidth_limit_b_hz:
-            _set_phase("bw_limit_b", 73, f"Applying {session.bandwidth_limit_b_hz}Hz low-pass to Side B...")
-            bw_out = os.path.join(work_dir, "b_bw_limited.wav")
-            cmd = [ffmpeg, "-y", "-i", audio_b_final,
-                   "-af", f"lowpass=f={session.bandwidth_limit_b_hz}",
-                   "-acodec", "pcm_s16le", bw_out]
-            subprocess.run(cmd, capture_output=True)
-            audio_b_final = bw_out
-
-        # ── Phase 5: Alignment (cross-correlation) ─────────────────────────
-        _set_phase("alignment", 78, "Aligning Side A and Side B...")
-        a_data = load_wav_float(audio_a_final)
-        b_data = load_wav_float(audio_b_final)
-
-        # Shared with the desktop build via core.alignment. The pre-Phase-0 web
-        # code searched every lag out to +/-5 s (locks onto periodicity/transient
-        # spurious peaks) and PADDED the delayed side with zeros at the head,
-        # which shifts musical content APART -- at the same timeline position
-        # the listener heard different music, silently invalidating the test.
-        alignment_lag, alignment_confidence = estimate_lag(a_data, b_data)
-        a_data, b_data = align_pair(a_data, b_data, alignment_lag)
-        pre_norm_null_db = null_depth_db(a_data, b_data)
-
-        # ── Phase 6: Length Trim ────────────────────────────────────────────
-        _set_phase("length_trim", 82, "Trimming to equal length...")
-        min_len = min(len(a_data), len(b_data))
-        a_data = a_data[:min_len]
-        b_data = b_data[:min_len]
-
-        # Save aligned audio
-        audio_a_aligned = os.path.join(work_dir, "a_aligned.wav")
-        audio_b_aligned = os.path.join(work_dir, "b_aligned.wav")
-        save_wav_float(audio_a_aligned, a_data, target_sr)
-        save_wav_float(audio_b_aligned, b_data, target_sr)
-
-        # ── Phase 7: Loudness Normalization ─────────────────────────────────
-        _set_phase("loudness", 88, "Normalizing loudness to -16 LUFS...")
-        audio_a_norm = os.path.join(work_dir, "a_normalized.wav")
-        audio_b_norm = os.path.join(work_dir, "b_normalized.wav")
-
-        # Simple EBU R128 approximation using ffmpeg ebur128 filter
-        loudness_a = measure_loudness_ffmpeg(audio_a_aligned)
-        loudness_b = measure_loudness_ffmpeg(audio_b_aligned)
-
-        target_lufs = -16.0
-        gain_a = target_lufs - loudness_a
-        gain_b = target_lufs - loudness_b
-
-        # Apply gain with no-clipping guard
-        apply_gain_ffmpeg(audio_a_aligned, audio_a_norm, gain_a, target_sr)
-        apply_gain_ffmpeg(audio_b_aligned, audio_b_norm, gain_b, target_sr)
-
-        # Measured BEFORE gain is applied: this is the level work
-        # normalization had to do, which is the disclosure that matters.
-        # (The desktop build compared post-normalization LUFS, a check that
-        # can never fail; both now report pre-delta and residual.)
-        loudness_diff = abs(loudness_a - loudness_b)
-
-        # Null depth on the DELIVERED pair, after level matching: the hard
-        # proof that A and B are level- and phase-aligned.
-        null_depth_final = null_depth_db(
-            load_wav_float(audio_a_norm), load_wav_float(audio_b_norm)
-        )
-        if loudness_diff > 0.5:
-            validation_notes_early = (
-                f"pipelines differed by {loudness_diff:.2f} dB before "
-                f"normalization (gain A={gain_a:+.2f} dB, B={gain_b:+.2f} dB): "
-                f"compare only the level-matched render"
-            )
-        else:
-            validation_notes_early = None
-
-        # ── Phase 8: Validation ─────────────────────────────────────────────
-        _set_phase("validation", 95, "Validating session...")
-        sr_a = probe_sample_rate(audio_a_norm)
-        sr_b = probe_sample_rate(audio_b_norm)
-        dur_a = probe_duration(audio_a_norm)
-        dur_b = probe_duration(audio_b_norm)
-
-        validation_notes = []
-        if validation_notes_early:
-            validation_notes.append(validation_notes_early)
-        if alignment_confidence < 0.5:
-            validation_notes.append(
-                f"alignment estimate is weak (normalized correlation "
-                f"{alignment_confidence:.2f}): treat this run as suspect"
-            )
-        if sr_a != sr_b:
-            validation_notes.append(f"Sample rate mismatch: A={sr_a}, B={sr_b}")
-        if abs(dur_a - dur_b) > 0.01:
-            validation_notes.append(f"Duration mismatch: A={dur_a:.3f}s, B={dur_b:.3f}s")
-
-        # ── Phase 9: validity gates ─────────────────────────────────────────
-        # Two measurements decide whether trials may start at all. Both are
-        # computed in core/ so the desktop refuses the same pairs the web does.
-        _set_phase("gates", 97, "Checking validity gates...")
-
-        # (a) Null gate: a pair built from identical pipelines has to null.
-        expected_identical = identical_pipeline_config(
-            stages_a_results,
-            stages_b_results,
-            bandwidth_a=(
-                session.bandwidth_limit_a_enabled,
-                session.bandwidth_limit_a_hz,
-            ),
-            bandwidth_b=(
-                session.bandwidth_limit_b_enabled,
-                session.bandwidth_limit_b_hz,
-            ),
-        )
-        null_gate = null_gate_decision(
-            null_depth_db=null_depth_final,
-            expected_identical=expected_identical,
-        )
-        if null_gate["status"] == "failed":
-            validation_notes.append(null_gate["reason"])
-
-        # (b) Calibration (canary) pair: the delivered Side A against the same
-        # material band-limited and hard clipped. Easy by construction.
-        # The pristine side is served as a byte copy of the delivered Side A, so
-        # the reference the listener hears IS Side A; the audibility measurement
-        # uses the same mono render every other web measurement uses.
-        canary_check: Dict[str, Any] = {
-            "status": "not_configured",
-            "usable": False,
-            "reason": "calibration trial not requested for this session",
-        }
-        canary_pristine_path: Optional[str] = None
-        canary_degraded_path: Optional[str] = None
-        if session.canary_enabled:
-            pristine_arr = load_wav_float(audio_a_norm)
-            degraded_arr = degrade_for_canary(pristine_arr, target_sr)
-            canary_check = canary_audio_check(
-                pristine=pristine_arr, degraded=degraded_arr
-            )
-            if canary_check.get("usable"):
-                canary_pristine_path = os.path.join(work_dir, "canary_pristine.wav")
-                canary_degraded_path = os.path.join(work_dir, "canary_degraded.wav")
-                shutil.copyfile(audio_a_norm, canary_pristine_path)
-                save_wav_float(
-                    canary_degraded_path,
-                    np.asarray(degraded_arr, dtype=np.float32),
-                    target_sr,
-                )
-                canary_check["pristine_path"] = canary_pristine_path
-                canary_check["degraded_path"] = canary_degraded_path
-            else:
-                # A coin-flip calibration is worse than none: it voids valid
-                # runs at random, so refuse the gate and say why.
-                validation_notes.append(
-                    f"calibration trial disabled: {canary_check['reason']}"
-                )
-
-        # Store session metadata
         with session.lock:
-            session.audio_a_path = audio_a_norm
-            session.audio_b_path = audio_b_norm
-            session.preprocess_ready = True
-            session.null_gate = null_gate
-            session.canary_check = canary_check
-            session.canary_pristine_path = canary_pristine_path
-            session.canary_degraded_path = canary_degraded_path
-            session.canary_available = bool(
-                (not session.canary_enabled) or canary_check.get("usable", False)
-            )
-            # The engine is rebuilt from the new pair: the null gate now guards
-            # /api/trial/start, and an unusable calibration pair turns the
-            # canary off. New audio means a new session, so old trials do not
-            # survive it.
-            session.configure_engine()
-            session.session_metadata = {
-                "input_file": session.input_file_name or "",
-                "original_sample_rate": original_sr,
-                "target_sample_rate": target_sr,
-                "sample_rate_mode": session.sample_rate_mode.value,
-                "resample_engine_used": resample_engine_used,
-                "duration_seconds": dur_a,
-                "channels": channels,
-                "stages_a_count": len(session.stages_a),
-                "stages_b_count": len(session.stages_b),
+            input_path = session.input_file_path
+            input_name = session.input_file_name
+            fingerprint = session.config_fingerprint()
+            mode = AudioRate(session.sample_rate_mode.value)
+            stages_a = [AudioStage(s.codec_id, s.bitrate_kbps) for s in session.stages_a]
+            stages_b = [AudioStage(s.codec_id, s.bitrate_kbps) for s in session.stages_b]
+            canary_enabled = session.canary_enabled
+            bandwidth = {
                 "bandwidth_limit_a_enabled": session.bandwidth_limit_a_enabled,
                 "bandwidth_limit_a_hz": session.bandwidth_limit_a_hz,
                 "bandwidth_limit_b_enabled": session.bandwidth_limit_b_enabled,
                 "bandwidth_limit_b_hz": session.bandwidth_limit_b_hz,
-                "loudness_a_lufs": round(loudness_a, 2),
-                "loudness_b_lufs": round(loudness_b, 2),
-                "loudness_diff_db": round(loudness_diff, 3),
-                "alignment_lag_samples": alignment_lag,
-                "alignment_confidence": round(float(alignment_confidence), 5),
-                "null_depth_db_pre_loudness": round(float(pre_norm_null_db), 3),
-                "null_depth_db": (
-                    None
-                    if null_depth_final == float("-inf")
-                    else round(float(null_depth_final), 3)
-                ),
-                "null_depth_is_perfect": null_depth_final == float("-inf"),
-                "loudness_gain_a_db": round(float(gain_a), 3),
-                "loudness_gain_b_db": round(float(gain_b), 3),
-                "loudness_is_pre_normalization": True,
-                "validation_notes": validation_notes,
-                "stages_a_details": stages_a_results,
-                "stages_b_details": stages_b_results,
-                # Phase 1 gates: the two measurements that decide whether this
-                # session was allowed to run, in the export, not just the UI.
-                "expected_identical_pair": expected_identical,
-                "null_gate": null_gate,
-                "canary_requested": bool(session.canary_enabled),
-                "canary_available": bool(session.canary_available),
-                "canary": canary_check,
-                "canary_trial_index": 1 if session.canary_enabled else None,
             }
+            # Neither a failed render nor cancellation may leave old playable
+            # audio whose identity/gates now describe another configuration.
+            session.invalidate_prepared_audio("audio preparation in progress")
+        if not input_path or not Path(input_path).is_file():
+            raise ValueError("Input file not found")
+        if not stages_a or not stages_b:
+            raise ValueError("Both pipelines require at least one stage")
 
+        class WebPipeline(AudioPipeline):
+            def _reset_cancel(self):
+                super()._reset_cancel()
+                if _is_cancelled():
+                    raise PipelineCancelled("Operation cancelled by user")
+
+            def _run(self, args):
+                if _is_cancelled():
+                    raise PipelineCancelled("Operation cancelled by user")
+                return super()._run(args)
+
+        pipeline = WebPipeline(ffmpeg_bin=find_ffmpeg(), ffprobe_bin=find_ffprobe())
+        with session.lock:
+            session.active_pipeline = pipeline
+        _set_phase("preparation", 10, "Preparing aligned, level-matched audio...")
+        work_dir = tempfile.mkdtemp(prefix="abx_web_")
+        prepared, _, _ = pipeline.prepare_session(
+            input_path=input_path,
+            codec_a_id=stages_a[-1].codec_id, bitrate_a_kbps=stages_a[-1].bitrate_kbps,
+            codec_b_id=stages_b[-1].codec_id, bitrate_b_kbps=stages_b[-1].bitrate_kbps,
+            mode=mode, work_dir=work_dir,
+            pipeline_stages_a=stages_a, pipeline_stages_b=stages_b,
+            canary_enabled=canary_enabled, **bandwidth,
+        )
+        audio_a_norm, audio_b_norm = prepared.track_a.pcm_path, prepared.track_b.pcm_path
+        validation = prepared.validation
+        loudness = validation.loudness.to_dict()
+        depth = validation.null_depth_db
+        from dataclasses import asdict
+
+        metadata = {
+            "input_file": input_name or "",
+            "original_sample_rate": prepared.original_sample_rate,
+            "target_sample_rate": prepared.target_sample_rate,
+            "sample_rate_mode": prepared.mode.value,
+            "resample_engine_used": prepared.resample_engine_used,
+            "duration_seconds": prepared.duration_seconds,
+            "channels": prepared.channels,
+            "channel_convention": prepared.disclosure["channel_convention"],
+            "preparation_order": prepared.disclosure["preparation_order"],
+            "amplitude_gate": prepared.disclosure["amplitude_gate"],
+            "disclosure": prepared.disclosure,
+            "stages_a_count": prepared.pipeline_stage_count_a,
+            "stages_b_count": prepared.pipeline_stage_count_b,
+            **bandwidth,
+            "loudness": loudness,
+            # Preserve legacy UI fields' PRE-normalization meaning. The full
+            # measured report above is the citation surface (not rounded).
+            "loudness_a_lufs": loudness["pre_lufs_a"],
+            "loudness_b_lufs": loudness["pre_lufs_b"],
+            "loudness_diff_db": loudness["pre_delta_db"],
+            "loudness_gain_a_db": loudness["gain_a_db"],
+            "loudness_gain_b_db": loudness["gain_b_db"],
+            "loudness_is_pre_normalization": True,
+            "alignment_lag_samples": validation.alignment_lag_samples,
+            "alignment_confidence": validation.alignment_confidence,
+            "null_depth_db_pre_loudness": (
+                validation.null_depth_db_pre_loudness
+                if math.isfinite(validation.null_depth_db_pre_loudness) else None
+            ),
+            "null_depth_db": depth if math.isfinite(depth) else None,
+            "null_depth_is_perfect": depth == float("-inf"),
+            "validation_notes": validation.notes,
+            "stages_a_details": [asdict(s) for s in prepared.track_a.stages],
+            "stages_b_details": [asdict(s) for s in prepared.track_b.stages],
+            "expected_identical_pair": prepared.null_gate["applicable"],
+            "null_gate": prepared.null_gate,
+            "canary_requested": canary_enabled,
+            "canary_available": bool(not canary_enabled or prepared.canary.get("usable")),
+            "canary": prepared.canary,
+            "canary_trial_index": 1 if canary_enabled else None,
+        }
+        with session.lock:
+            if session.preprocess_cancelled:
+                raise PipelineCancelled("Operation cancelled by user")
+            if (session.config_fingerprint() != fingerprint
+                    or session.canary_enabled != canary_enabled):
+                raise ValueError("Configuration changed during preparation; render again")
+            identity = {
+                "id": _prepared_audio_id(audio_a_norm, audio_b_norm, fingerprint),
+                "a_sha256": _file_sha256(audio_a_norm),
+                "b_sha256": _file_sha256(audio_b_norm),
+                "config_fingerprint": fingerprint,
+                "target_sample_rate": prepared.target_sample_rate,
+                "channels": prepared.channels,
+                "channel_convention": prepared.disclosure["channel_convention"],
+            }
+            session.audio_a_path, session.audio_b_path = audio_a_norm, audio_b_norm
+            session.null_gate = prepared.null_gate
+            session.canary_check = prepared.canary
+            session.canary_pristine_path = prepared.canary_pristine_path
+            session.canary_degraded_path = prepared.canary_degraded_path
+            session.canary_available = metadata["canary_available"]
+            session.prepared_audio = identity
+            session.prepared_config_fingerprint = fingerprint
+            session.stale_audio_reason = None
+            metadata["prepared_audio"] = identity
+            session.session_metadata = metadata
+            session.configure_engine()
+            session.preprocess_ready = True
+            published = True
         _set_phase("complete", 100, "Preprocessing complete!")
-
     except Exception as e:
         with session.lock:
+            session.preprocess_ready = False
             session.preprocess_error = str(e)
-            session.preprocess_phase = "error"
-            session.preprocess_message = f"Error: {str(e)}"
+            session.preprocess_phase = "cancelled" if session.preprocess_cancelled else "error"
+            session.preprocess_message = str(e)
     finally:
+        if work_dir and not published:
+            # Delete only the exact unpublished directory allocated above,
+            # resolved under the platform temp root with our owned prefix.
+            target = Path(work_dir).resolve()
+            if (target.parent == Path(tempfile.gettempdir()).resolve()
+                    and target.name.startswith("abx_web_")):
+                shutil.rmtree(target, ignore_errors=True)
         with session.lock:
+            session.active_pipeline = None
             session.preprocess_running = False
 
 
 # ── FFmpeg Helper Functions ──────────────────────────────────────────────────
 
-def load_wav_float(path: str) -> np.ndarray:
-    """Load a WAV file as float32 mono array."""
-    ffprobe = find_ffprobe()
-    probe_cmd = [ffprobe, "-v", "quiet", "-print_format", "json",
-                 "-show_streams", path]
-    r = subprocess.run(probe_cmd, capture_output=True, text=True)
-    info = json.loads(r.stdout)
-    sr = 48000
-    for s in info.get("streams", []):
-        if s.get("codec_type") == "audio":
-            sr = int(s.get("sample_rate", 48000))
-
-    cmd = [find_ffmpeg(), "-y", "-i", path,
-           "-acodec", "pcm_f32le", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"]
-    r = subprocess.run(cmd, capture_output=True)
-    return np.frombuffer(r.stdout, dtype=np.float32)
+def _file_sha256(path: str) -> str:
+    """Digest of a rendered file, so a run can name the bytes it used."""
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
 
 
-def save_wav_float(path: str, data: np.ndarray, sample_rate: int):
-    """Save float32 array as WAV."""
-    import struct
-    with open(path, "wb") as f:
-        # Write WAV header for 32-bit float mono
-        num_samples = len(data)
-        byte_rate = sample_rate * 4
-        block_align = 4
-        data_size = num_samples * 4
-        file_size = 36 + data_size
-
-        f.write(b"RIFF")
-        f.write(struct.pack("<I", file_size - 8))
-        f.write(b"WAVE")
-        f.write(b"fmt ")
-        f.write(struct.pack("<I", 16))
-        f.write(struct.pack("<H", 3))  # IEEE float
-        f.write(struct.pack("<H", 1))  # mono
-        f.write(struct.pack("<I", sample_rate))
-        f.write(struct.pack("<I", byte_rate))
-        f.write(struct.pack("<H", block_align))
-        f.write(struct.pack("<H", 32))
-        f.write(b"data")
-        f.write(struct.pack("<I", data_size))
-        f.write(data.tobytes())
-
-
-def measure_loudness_ffmpeg(path: str) -> float:
-    """Measure integrated loudness using ffmpeg ebur128 filter."""
-    cmd = [find_ffmpeg(), "-i", path, "-af", "ebur128=peak=true",
-           "-f", "null", "-", "-nostdin"]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    # Parse integrated loudness from stderr
-    for line in r.stderr.split("\n"):
-        if "I:" in line and "Integrated" not in line:
-            parts = line.strip().split()
-            for i, p in enumerate(parts):
-                if p == "I:" or (p.startswith("I") and "+" in p):
-                    try:
-                        return float(p.replace("I:", "").replace("+", ""))
-                    except ValueError:
-                        continue
-    # Fallback: simple RMS-based estimate
-    data = load_wav_float(path)
-    if len(data) > 0:
-        rms = np.sqrt(np.mean(data ** 2))
-        if rms > 0:
-            return 20 * math.log10(rms) - 3.5  # rough LUFS approximation
-    return -20.0
-
-
-def apply_gain_ffmpeg(input_path: str, output_path: str, gain_db: float, sample_rate: int):
-    """Apply gain to audio with no-clipping guard."""
-    vol = max(min(gain_db, 12), -30)  # clamp gain
-    cmd = [find_ffmpeg(), "-y", "-i", input_path,
-           "-af", f"volume={vol}dB,agate=threshold=-60dB:attack=10:release=100",
-           "-acodec", "pcm_s16le", "-ar", str(sample_rate), output_path]
-    subprocess.run(cmd, capture_output=True)
+def _prepared_audio_id(a_path: str, b_path: str, fingerprint: str) -> str:
+    """Stable identity of the rendered pair: both digests + the config that
+    produced them. Changes when the audio changes, and when the configuration
+    that produced it changes -- which is exactly when the browser's decoded
+    buffers and any run built on them stop being valid."""
+    digest = hashlib.sha256(
+        f"{_file_sha256(a_path)}|{_file_sha256(b_path)}|{fingerprint}".encode()
+    )
+    return "sha256:" + digest.hexdigest()[:32]
 
 
 def probe_sample_rate(path: str) -> int:
@@ -1084,6 +1041,18 @@ def audio_info():
         "sample_rate": sr,
         "duration_seconds": dur,
         "buffers_identical": buffers_identical,
+        # What the browser's decoded-buffer cache is keyed on. A/B are served
+        # per trial through that trial's display mapping, so the client can
+        # reuse buffers only while BOTH the mapping and the rendered pair are
+        # unchanged; these two fields are how it can tell.
+        "prepared_audio_id": (session.prepared_audio or {}).get("id"),
+        "display_mapping": session.engine.pending_mapping,
+        "trial_index": (
+            session.engine.pending_plan.trial_index
+            if session.engine.pending_plan is not None
+            else None
+        ),
+        "mapping_applied_server_side": True,
     })
 
 
@@ -1098,7 +1067,6 @@ def _validity_lines() -> List[str]:
     """Same evidence block as the desktop panel, same wording (core.report)."""
     meta = session.session_metadata or {}
     stats = session.engine.stats()
-    has_loudness = "loudness_diff_db" in meta
     return validity_lines(
         null_depth_db=(
             float("-inf")
@@ -1107,17 +1075,7 @@ def _validity_lines() -> List[str]:
         ),
         alignment_lag_samples=int(meta.get("alignment_lag_samples", 0)),
         alignment_confidence=float(meta.get("alignment_confidence", 0.0)),
-        loudness=(
-            None
-            if not has_loudness
-            else {
-                "pre_delta_db": float(meta["loudness_diff_db"]),
-                "residual_delta_db": 0.0,
-                "gain_a_db": float(meta.get("loudness_gain_a_db", 0.0)),
-                "gain_b_db": float(meta.get("loudness_gain_b_db", 0.0)),
-                "global_trim_db": 0.0,
-            }
-        ),
+        loudness=meta.get("loudness"),
         disclosure=meta.get("disclosure", {}),
         notes=list(meta.get("validation_notes", [])),
         stats={
@@ -1125,6 +1083,13 @@ def _validity_lines() -> List[str]:
             "is_final": stats["is_final"],
             "required_correct": stats["required_correct"],
             "ability_ci95": stats["ability_ci95"],
+            # Lifecycle reaches the shared report wording, so the panel, the
+            # export and the desktop all say SEALED, never FINAL, for a run
+            # that was stopped early.
+            "lifecycle": stats["lifecycle"],
+            "sealed": stats["sealed"],
+            "complete": stats["complete"],
+            "total_trials": stats["total_trials"],
         },
         commitment=session.engine.session_commitment,
         canary=_canary_block(),
@@ -1154,24 +1119,49 @@ def _trial_dict(trial) -> Dict[str, Any]:
     }
 
 
+def _lifecycle_replay_payload() -> Dict[str, Any]:
+    """What to tell a client that asked for a trial the run can no longer give.
+
+    One shape for all three refusals (gate closed, N reached, sealed) so the UI
+    shows the engine's own reasons and knows which action it is being offered:
+    fix the chain, export a finished run, or start a new one.
+    """
+    engine = session.engine
+    return {
+        "error": "this run accepts no further trials",
+        "reasons": engine.why_no_answers() or engine.gate_reasons(),
+        "lifecycle": engine.lifecycle,
+        "complete": engine.lifecycle == "completed",
+        "sealed": engine.lifecycle == "aborted",
+        "can_accept_answers": engine.can_accept_answers(),
+        "gates": engine.gates(),
+        "stats": session.stats(),
+    }
+
+
 @app.route("/api/trial/start", methods=["POST"])
 def start_trial():
     """Start a new ABX trial.
 
-    409 while a validity gate is shut: a session that failed its calibration
-    trial, or a pair that should null and does not, cannot be offered trials.
-    The engine (not this route) owns that decision, so the desktop and the web
-    refuse identically.
+    409 when the engine refuses a trial: a validity gate is shut, the
+    pre-registered N has been answered, the run was sealed, or there is no
+    prepared pair to run on. The engine (not this route) owns that decision, so
+    the desktop and the web refuse identically, and a client cannot answer its
+    way past N by scripting the API.
     """
     with session.lock:
         try:
             info = session.new_trial()
         except TrialGateClosed as exc:
-            return jsonify({
-                "error": str(exc),
-                "reasons": list(exc.reasons),
-                "gates": session.engine.gates(),
-            }), 409
+            payload = _lifecycle_replay_payload()
+            payload["error"] = str(exc)
+            payload["reasons"] = list(exc.reasons)
+            return jsonify(payload), 409
+        except StudyLifecycleError as exc:
+            payload = _lifecycle_replay_payload()
+            payload["error"] = str(exc)
+            payload["reasons"] = list(exc.reasons) or payload["reasons"]
+            return jsonify(payload), 409
     return jsonify(info)
 
 
@@ -1187,6 +1177,13 @@ def submit_answer():
             trial = session.submit_answer(data["answer"])
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
+        except StudyLifecycleError as exc:
+            # No trial in flight because the run is over: say so, in the
+            # engine's words, rather than pretending an answer is possible.
+            payload = _lifecycle_replay_payload()
+            payload["error"] = str(exc)
+            payload["reasons"] = list(exc.reasons) or payload["reasons"]
+            return jsonify(payload), 409
 
     return jsonify({
         # Legacy row shape plus `kind`: the answer feedback names the trial as
@@ -1194,6 +1191,23 @@ def submit_answer():
         "trial": trial_result_to_dict(trial),
         "stats": session.stats(),
     })
+
+
+@app.route("/api/trial/seal", methods=["POST"])
+def seal_run():
+    """End the run now, on purpose.
+
+    An early export has to stop the run to be honest: the secret derives X for
+    every trial that has not been answered, so while answers are due the export
+    is REDACTED. Sealing closes the run, releases the key, and labels the run
+    sealed -- a partial run that is auditable and explicitly not a result. The
+    other way to get a verifiable export is to finish the pre-registered N.
+    """
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason") or "sealed by the tester"
+    with session.lock:
+        result = session.seal_run(reason)
+    return jsonify(result)
 
 
 @app.route("/api/trial/stats", methods=["GET"])
@@ -1241,6 +1255,14 @@ def get_diagnostics():
             "gates": gates,
             "run_valid": session.engine.run_valid,
             "current_trial_kind": session.engine.current_trial_kind,
+            # Lifecycle of the run, plus what it means for the client: no
+            # further trials, redacted export, sealed-not-final.
+            "lifecycle": session.engine.lifecycle,
+            "can_accept_answers": session.engine.can_accept_answers(),
+            "run_closed_because": session.engine.why_no_answers(),
+            "config_frozen": session.engine.run_under_way(),
+            "prepared_audio": session.prepared_audio,
+            "run_lock": session.engine.run_lock,
             # legacy keys the existing UI reads
             "mapping_a_to": (
                 session.engine.pending_mapping or {}).get("A"),
@@ -1253,9 +1275,24 @@ def get_diagnostics():
 
 @app.route("/api/export/json", methods=["GET"])
 def export_json():
-    """Export results as JSON file."""
+    """Export results as JSON file.
+
+    Always available, including for a void run and a run that stopped early --
+    a failed calibration is a result worth publishing, and hiding it is how
+    failed runs get quietly dropped. What the export may NOT do is present a
+    run that is not over as if it were:
+
+      * while answers are still due, `verifiability` is a REDACTED snapshot:
+        the commitment and the answered rows are there, the secret is not,
+        because it derives X for every trial still to come.
+      * a sealed run says so (`sealed`, `incomplete`) and is never `complete`.
+      * only a run that reached its pre-registered N is `complete`, and only
+        then is a pass claimable (`stats.significant_verdict`).
+    """
     with session.lock:
         gates = session.engine.gates()
+        stats = session.stats()
+        reveal = session.engine.reveal()
         data = {
             "exported_at_utc": datetime.now(timezone.utc).isoformat(),
             "session": {
@@ -1263,16 +1300,28 @@ def export_json():
                 "export_schema": "abx-session/1",
                 "tool": "codec-abx-tester/web",
                 "disclosure": session.session_metadata.get("disclosure", {}),
-                "verifiability": session.engine.reveal(),
+                "verifiability": reveal,
                 "canary": _canary_block(),
                 "null_gate": session.engine.null_gate_block(),
                 "gates": gates,
                 "run_valid": session.engine.run_valid,
+                # Lifecycle of the run this file describes.
+                "lifecycle": session.engine.lifecycle,
+                "complete": stats["complete"],
+                "sealed": stats["sealed"],
+                "sealed_reason": stats["sealed_reason"],
+                "incomplete": not stats["complete"],
+                "can_accept_answers": stats["can_accept_answers"],
+                "export_is_redacted": bool(reveal.get("redacted")),
+                "run_closed_because": stats["run_closed_because"],
+                "prepared_audio": session.prepared_audio,
+                "run_lock": session.engine.run_lock,
+                "audio_stale_reason": session.stale_audio_reason,
             },
             # Calibration included: it is part of the committed X sequence, so
             # a third party verifying this file sees the same indices.
             "trials": [_trial_dict(t) for t in session.engine.all_trials()],
-            "stats": session.stats(),
+            "stats": stats,
             "validity_lines": _validity_lines(),
         }
 
@@ -1325,6 +1374,9 @@ def session_info():
             "has_input": session.input_file_path is not None,
             "input_filename": session.input_file_name,
             "preprocess_ready": session.preprocess_ready,
+            "prepared_pair_ready": session.prepared_pair_ready(),
+            "prepared_audio_id": (session.prepared_audio or {}).get("id"),
+            "audio_stale_reason": session.stale_audio_reason,
             "label_mapping_mode": session.label_mapping_mode.value,
             "canary_requested": bool(session.canary_enabled),
             "canary_available": bool(session.canary_available),
@@ -1332,6 +1384,12 @@ def session_info():
             "null_gate": session.engine.null_gate_block(),
             "gates_open": gates["open"],
             "run_valid": session.engine.run_valid,
+            # Lifecycle: the UI reads this to stop advancing, to offer "seal",
+            # and to know when an export is redacted rather than verifiable.
+            "lifecycle": session.engine.lifecycle,
+            "can_accept_answers": session.engine.can_accept_answers(),
+            "run_closed_because": session.engine.why_no_answers(),
+            "config_frozen": session.engine.run_under_way(),
         })
 
 

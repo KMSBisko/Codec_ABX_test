@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import shutil
@@ -24,6 +23,10 @@ from core.alignment import (
     null_gate_decision,
 )
 from core.canary import build_canary_pair
+from core.preparation import (
+    CHANNEL_CONVENTION, PREPARATION_ORDER, checked_audio, measure_delivery,
+    normalize_pair, sample_peak_dbfs, select_sample_rate,
+)
 
 from .models import (
     CodecProfile,
@@ -308,6 +311,13 @@ class AudioPipeline:
         """Everything that could make the exported report differ from what the
         user asked for. Must land in the JSON export verbatim."""
         return {
+            "channel_convention": CHANNEL_CONVENTION,
+            "preparation_order": list(PREPARATION_ORDER),
+            "amplitude_gate": "none",
+            "delivery_format": "PCM_16",
+            "loudness_meter": "pyloudnorm/BS.1770",
+            "post_loudness_basis": "delivered_pcm",
+            "peak_measurement": "sample_peak_not_true_peak",
             "codec_fallbacks": list(self._codec_fallbacks),
             "codec_substitution_allowed": self.allow_codec_substitution,
             "resample": {
@@ -577,7 +587,7 @@ class AudioPipeline:
     @staticmethod
     def _load_audio(path: str) -> Tuple[np.ndarray, int]:
         data, sr = sf.read(path, always_2d=True, dtype="float32")
-        return data, int(sr)
+        return checked_audio(data), int(sr)
 
     @classmethod
     def load_audio(cls, path: str) -> Tuple[np.ndarray, int]:
@@ -604,58 +614,12 @@ class AudioPipeline:
         b: np.ndarray,
         sample_rate: int,
         target_lufs: float,
-    ) -> Tuple[np.ndarray, np.ndarray, float, float, float, float]:
-        meter = pyln.Meter(sample_rate)
-
-        lufs_a = meter.integrated_loudness(a)
-        lufs_b = meter.integrated_loudness(b)
-
-        gain_a_db = target_lufs - lufs_a
-        gain_b_db = target_lufs - lufs_b
-
-        a2 = a * float(10 ** (gain_a_db / 20.0))
-        b2 = b * float(10 ** (gain_b_db / 20.0))
-
-        peak_a = float(np.max(np.abs(a2)))
-        peak_b = float(np.max(np.abs(b2)))
-
-        overflow_a_db = 20.0 * math.log10(peak_a) if peak_a > 1.0 else 0.0
-        overflow_b_db = 20.0 * math.log10(peak_b) if peak_b > 1.0 else 0.0
-        global_trim_db = max(0.0, overflow_a_db, overflow_b_db)
-
-        if global_trim_db > 0.0:
-            trim = float(10 ** (-global_trim_db / 20.0))
-            a2 *= trim
-            b2 *= trim
-
-        final_lufs_a = meter.integrated_loudness(a2)
-        final_lufs_b = meter.integrated_loudness(b2)
-
-        loudness_report = LoudnessReport(
-            pre_lufs_a=float(lufs_a),
-            pre_lufs_b=float(lufs_b),
-            post_lufs_a=float(final_lufs_a),
-            post_lufs_b=float(final_lufs_b),
-            gain_a_db=float(gain_a_db),
-            gain_b_db=float(gain_b_db),
-            global_trim_db=float(global_trim_db),
-            target_lufs=float(target_lufs),
+    ) -> Tuple[np.ndarray, np.ndarray, float, float, float, float, LoudnessReport]:
+        a2, b2, report = normalize_pair(
+            a, b, pyln.Meter(sample_rate).integrated_loudness, target_lufs,
         )
-
-        peak_a_lin = float(np.max(np.abs(a2)))
-        peak_b_lin = float(np.max(np.abs(b2)))
-        peak_a_dbfs = -999.0 if peak_a_lin <= 0 else 20.0 * math.log10(peak_a_lin)
-        peak_b_dbfs = -999.0 if peak_b_lin <= 0 else 20.0 * math.log10(peak_b_lin)
-
-        return (
-            a2,
-            b2,
-            float(final_lufs_a),
-            float(final_lufs_b),
-            peak_a_dbfs,
-            peak_b_dbfs,
-            loudness_report,
-        )
+        return (a2, b2, report.post_lufs_a, report.post_lufs_b,
+                sample_peak_dbfs(a2), sample_peak_dbfs(b2), report)
 
     @staticmethod
     def _apply_lowpass(data: np.ndarray, sample_rate: int, cutoff_hz: int) -> np.ndarray:
@@ -702,7 +666,10 @@ class AudioPipeline:
         if original_sr <= 0:
             raise PipelineError("Unable to detect input sample rate")
 
-        target_sr = original_sr if mode == SampleRateMode.NATIVE else 48000
+        source_channels = int(meta.get("channels", 0))
+        if source_channels not in (1, 2):
+            raise PipelineError("Audio preparation supports mono or stereo only")
+        target_sr = select_sample_rate(original_sr, mode.value)
 
         wd = Path(work_dir)
         wd.mkdir(parents=True, exist_ok=True)
@@ -799,6 +766,8 @@ class AudioPipeline:
         arr_a, sr_a = self._load_audio(dec_a)
         arr_b, sr_b = self._load_audio(dec_b)
 
+        arr_a = checked_audio(arr_a, source_channels)
+        arr_b = checked_audio(arr_b, source_channels)
         if sr_a != target_sr or sr_b != target_sr:
             raise PipelineError("Decoded outputs did not preserve target sample rate")
 
@@ -818,6 +787,7 @@ class AudioPipeline:
                 raise PipelineError("Bandwidth limit cutoff B must be 14 kHz, 16 kHz, or 18 kHz")
             arr_b = self._apply_lowpass(arr_b, target_sr, int(bandwidth_limit_b_hz))
 
+        pre_norm_null_db = null_depth_db(arr_a, arr_b)
         (
             arr_a,
             arr_b,
@@ -833,15 +803,25 @@ class AudioPipeline:
             target_lufs=-16.0,
         )
 
-        # Null depth on the FINAL delivered pair: proves the level/phase
-        # matching the whole pipeline was built to achieve.
-        null_depth = null_depth_db(arr_a, arr_b)
-
-
         norm_a_path = wd / "track_a_normalized.wav"
         norm_b_path = wd / "track_b_normalized.wav"
         self._write_float_wav(str(norm_a_path), arr_a, target_sr)
         self._write_float_wav(str(norm_b_path), arr_b, target_sr)
+
+        # Delivery, not an ideal float render: the player, report and gates must
+        # all describe the SAME PCM, including serialization/quantization.
+        arr_a, sr_a = self._load_audio(str(norm_a_path))
+        arr_b, sr_b = self._load_audio(str(norm_b_path))
+        checked_audio(arr_a, source_channels)
+        checked_audio(arr_b, source_channels)
+        if sr_a != target_sr or sr_b != target_sr or arr_a.shape != arr_b.shape:
+            raise PipelineError("Delivered PCM shape/sample rate mismatch")
+        loudness_report = measure_delivery(
+            loudness_report, arr_a, arr_b, pyln.Meter(target_sr).integrated_loudness,
+        )
+        lufs_a, lufs_b = loudness_report.post_lufs_a, loudness_report.post_lufs_b
+        peak_a_dbfs, peak_b_dbfs = sample_peak_dbfs(arr_a), sample_peak_dbfs(arr_b)
+        null_depth = null_depth_db(arr_a, arr_b)
 
         min_len = min(len(arr_a), len(arr_b))
         arr_a = arr_a[:min_len]
@@ -855,9 +835,9 @@ class AudioPipeline:
         # A silent wrong lag invalidates the entire comparison, so a weak
         # correlation estimate must be visible, not swallowed.
         # Level matching is the classic ABX trap: a ~0.5 dB difference reads
-        # as "clearer highs", not as "louder". Normalization fixes the DELIVERY
-        # (residual ~0), so the residual can never fail; what a reader needs is
-        # how much work normalization had to do.
+        # as "clearer highs", not as "louder". Report both the work performed
+        # by normalization and the independently measured delivered residual;
+        # a writer/filter error must remain visible, not be stamped as zero.
         if loudness_report.pre_normalization_delta_db > 0.5:
             notes.append(
                 f"pipelines differed by "
@@ -925,6 +905,7 @@ class AudioPipeline:
             notes=notes,
             alignment_confidence=round(float(alignment_confidence), 5),
             null_depth_db=float(null_depth),
+            null_depth_db_pre_loudness=float(pre_norm_null_db),
         )
 
         duration_seconds = min_len / float(target_sr)

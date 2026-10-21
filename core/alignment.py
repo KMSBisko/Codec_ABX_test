@@ -117,8 +117,16 @@ def null_depth_db(a: np.ndarray, b: np.ndarray) -> float:
     For a pure level error of x dB the depth is 20*log10(|10^(x/20)-1|):
     0.5 dB -> -24.5, 0.1 dB -> -38.7, 0.01 dB -> -58.8.
     """
-    a_m = np.asarray(_mono(a), dtype=np.float64)
-    b_m = np.asarray(_mono(b), dtype=np.float64)
+    # Measure every delivered channel. A downmix can cancel an anti-phase
+    # stereo residual (or even the reference) and falsely claim a perfect null.
+    a_m = np.asarray(a, dtype=np.float64)
+    b_m = np.asarray(b, dtype=np.float64)
+    if a_m.ndim == 1:
+        a_m = a_m[:, None]
+    if b_m.ndim == 1:
+        b_m = b_m[:, None]
+    if a_m.shape[1:] != b_m.shape[1:]:
+        raise ValueError("Null measurement requires equal channel layouts")
     n = min(len(a_m), len(b_m))
     if n == 0:
         return float("-inf")

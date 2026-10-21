@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
+from core.preparation import LoudnessReport
+
 
 class SampleRateMode(str, Enum):
     NATIVE = "native"
@@ -33,36 +35,6 @@ class CodecProfile:
         if self.simulated_label:
             return f"{self.display_name} ({self.simulated_label})"
         return self.display_name
-
-
-@dataclass
-class LoudnessReport:
-    """What loudness normalization actually did.
-
-    The pre-Phase-0 validation compared the two sides' LUFS AFTER both had
-    been gain-matched to the same target, so the reported 'loudness delta'
-    was ~0.0000 dB for every run and the check could not fail. The number
-    that matters is BOTH of these:
-      * how far apart the pipelines pushed the levels (pre-normalization)
-      * how tight the delivered pair actually is (post-normalization)
-    """
-
-    pre_lufs_a: float
-    pre_lufs_b: float
-    post_lufs_a: float
-    post_lufs_b: float
-    gain_a_db: float
-    gain_b_db: float
-    global_trim_db: float
-    target_lufs: float
-
-    @property
-    def pre_normalization_delta_db(self) -> float:
-        return abs(self.pre_lufs_a - self.pre_lufs_b)
-
-    @property
-    def residual_delta_db(self) -> float:
-        return abs(self.post_lufs_a - self.post_lufs_b)
 
 
 @dataclass
@@ -108,8 +80,9 @@ class SessionValidation:
     alignment_confidence: float = 0.0
     loudness: Optional[LoudnessReport] = None
     # Residual level after subtracting B from A: hard proof of level/phase
-    # matching, not a claim. inf = perfect null, NaN = not measured.
+    # matching, not a claim. -inf = perfect null, NaN = not measured.
     null_depth_db: float = float("nan")
+    null_depth_db_pre_loudness: float = float("nan")
 
 
 @dataclass

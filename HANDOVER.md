@@ -19,16 +19,24 @@ Bonferroni) are the published-study standard.
 
 ## Current state
 
-Phase 0 and 0b are done, plus Phase 1 items 1 and 2 (canary gate, null gate):
-`git log --oneline` → baseline, `Phase 0:`, `Phase 0b:`, `Phase 1:`.
+Phase 0 and 0b are done, plus Phase 1 items 1 and 2 (canary gate, null gate),
+Phase 2 (study lifecycle), and Phase 3 (shared audio preparation).
+Phase 2 and Phase 3 are committed together, at the user's request, as
+`Phase 2/3: bounded studies and shared audio preparation`, following `4da8fb7`
+(`Phase 1:`). Use `git log -1` for the exact revision. The refreshed
+[HANDOVER_PROMPT.md](HANDOVER_PROMPT.md) is the next-session entry point: honest
+CI coverage and a reproducible playback acceptance kit, with actual listening
+still requiring an authorized runtime and a human operator.
 
-- **177 tests pass** (111 before Phase 1, +66): 30 on the two gates in `core/`,
-  14 on the web gate wiring, 12 on the desktop engine shim and sealed export,
-  6 on report wording, 4 on the gates with **real ffmpeg audio**. Pipeline
-  tests need ffmpeg: 13 of the 177 are `-m pipeline`.
+- **274 tests pass** (177 before Phase 2, +60 lifecycle tests, +37 Phase 3
+  preparation tests). Phase 3 adds 14 backend-free preparation/measurement tests,
+  7 preparation/lifecycle route tests, and 16 real-audio parity/measurement
+  regressions. **29** of the 274 are `-m pipeline` (ffmpeg); **245** are
+  non-pipeline. The browser/desktop UI remains covered by static contracts,
+  not execution or listening.
 - `core/` is the single source of truth for statistics, blinding, alignment,
-  **validity gates** and report wording, shared by the PyQt6 desktop and Flask
-  web shells.
+  **validity gates**, **the study lifecycle** and report wording, shared by the
+  PyQt6 desktop and Flask web shells.
 - The desktop and web shells previously carried **independent trial engines**
   with divergent randomness and divergent blinding heuristics. They cannot
   diverge silently again — `tests/test_core_discipline.py` enforces the import
@@ -54,6 +62,39 @@ Phase 0 and 0b are done, plus Phase 1 items 1 and 2 (canary gate, null gate):
    missing/NaN null measurement blocks trials. A canary pair whose degradation
    is not audible disables the canary (status `unavailable`) instead of voiding
    valid runs at random.
+7. **A run is a bounded, named thing with one ending.** `ABXEngine.lifecycle`
+   is `configured → running → completed | aborted`, and the transitions are
+   engine-owned, not UI-owned:
+   - scored trials stop **exactly at the pre-registered N** (calibration never
+     counts toward it); `new_trial()` and `submit_answer()` raise
+     `TrialLimitReached` past it, and `can_accept_answers()` says so;
+   - the plan (`planned_trials`, `label_mode`, `alpha`, `canary_enabled`) is
+     **frozen from the first staged trial** — the moment a commitment is
+     published and audio is playable. A write is `ConfigLocked`, enforced in the
+     engine (`__setattr__`), so a shell cannot edit around it;
+   - the run is locked to a **prepared-audio identity** (`set_prepared_audio`:
+     digests of the delivered pair + the fingerprint of the configuration that
+     rendered it). Changing that configuration drops the pair: trials refuse to
+     start until it is re-rendered;
+   - `reveal()` is **REDACTED while the run can accept further answers** — the
+     secret derives X for every trial not yet answered. Only a `completed` run
+     (at N) or a permanently **sealed** one (`abort`, a distinct label) releases
+     it, and `verifiable`/`redacted` in the payload name which one you hold;
+   - `is_final` is true only at N, `verdict()` prints `SEALED`/`PROVISIONAL`
+     otherwise, and `significant_verdict` (not the raw `significant`) is the
+     claimable pass. An incomplete run can never be stamped as a result.
+   A void/sealed run stays **exportable**: a failed calibration is a result
+   worth publishing, and the way failed runs get quietly dropped is by having
+   no way out of the tool.
+8. **The display mapping has exactly one owner: the server that serves the
+   bytes.** `side_audio_path()` resolves a display label through
+   `plan.display_mapping` (canary pair included); the browser plays what it is
+   given and maps nothing. Mapping twice inverts it.
+9. **One preparation policy, measured delivery.** Both shells use the same
+   headless preparation implementation and backend-free core loudness policy.
+   Preserve mono/stereo; original-rate disclosure comes from probing the source.
+   Gain matching is followed by common peak trim, never a hidden noise gate.
+   Loudness residuals and null decisions are measured on delivered PCM16.
 
 ## Verified vs NOT verified
 
@@ -61,14 +102,20 @@ Phase 0 and 0b are done, plus Phase 1 items 1 and 2 (canary gate, null gate):
 |---|---|
 | Statistics (exact binomial, Clopper-Pearson CI, power→N, Holm) | verified — against published ABX tables and exact rational arithmetic; CI validated against Beta quantiles two independent ways |
 | Strict codec refusal + opt-in disclosure | verified against real ffmpeg (`libldac` absent here, so the path is exercised) |
-| Null depth / alignment / loudness numbers | verified — table in the `Phase 0b` commit message |
+| Null depth / alignment / loudness numbers | verified — historical table in `Phase 0b`; Phase 3 now remeasures serialized delivery and measures null energy across all channels |
+| Shared desktop/web preparation, mono/stereo and same-channel canary, real loudness residual, quiet-tail/bandwidth parity, original 96 kHz FLAC native/48k modes, codec-internal rate adaptation, clipping guard | verified against real ffmpeg/served PCM and independent LUFS remeasurement in Phase 3 tests; not listening validation |
 | Blinding fixes, no-leak contract, web API, export | verified by tests |
 | Canary gate semantics (index 1, in the commitment, out of the binomial; fail → `run_valid=false`, verdict `VOID`, further trials refused) | verified by tests, both shells' engines (desktop via the shim) |
 | Null gate semantics (identical pair must measure ≤ −60 dB; missing/NaN measurement fails **closed**; a genuinely different pair is `not_applicable` and never blocks) | verified by tests, incl. real ffmpeg audio (identical pipelines → perfect null → `passed`; opus vs lossless → `not_applicable`) |
-| Canary material is audible, not a coin flip | verified numerically — 3 kHz band-limit + 10× drive clipped at ±0.45 measures **−2.68 dB** (mono) / **−2.18 dB** (stereo) residual on 48 kHz tonal+noise+transient test material, and **+0.79 dB** on audio through the real web pipeline, against a −30 dB audibility floor. Silent input → `not_audible`, canary disabled |
+| Canary material is audible, not a coin flip | verified numerically — 3 kHz band-limit + 10× drive clipped at ±0.45 measures **−2.68 dB** (mono) / **−2.18 dB** (stereo) residual on 48 kHz tonal+noise+transient test material, against a −30 dB audibility floor (historical fixture measurements). The old web +0.79 dB mono/stereo mismatch is superseded by Phase 3: both canary files now preserve the delivered channels. Silent canary material → `not_audible`, canary disabled; silent input preparation itself is refused because finite integrated LUFS is unavailable |
 | Null gate threshold is on a real cliff, not a guess | verified numerically — level error 0.001 dB → −78.78, 0.0087 dB → **−60.00** (the chosen floor), 0.01 dB → −58.77, 0.1 dB → −38.73, 0.5 dB → −24.55; 1-sample misalignment → −13.92; identical → perfect (−inf) |
 | Desktop canary audio swap + gate widgets in `app/main.py` | **UNVERIFIED.** PyQt6 imports fail on `libGL.so.1`. `_make_engine` / `_on_planned_trials_changed` (called at 4 sites) were **never defined** — the window raised `AttributeError` on construction. They are defined now and their logic is tested through `app/abx_engine`; the window itself has never been opened |
 | Web browser UI (`#gateBanner`, canary badge, stats rows) | **UNVERIFIED in a browser.** `node --check` passes; the API contract behind it is tested (409 + reasons on a blocked gate, `kind` in exports) |
+| Study lifecycle (N bound, plan freeze at the first staged trial, prepared-audio identity, mid-run redaction, seal vs complete, `significant_verdict`, export markers) | verified by tests — core engine, the Flask HTTP layer, the desktop shim, and the ffmpeg pipeline (redact → seal → verifiable, `SEALED` in `validity_lines`) |
+| Web served-audio mapping (A/B/X judged **from the bytes served**, 16-trial perfect listener scored entirely from audio, calibration pair follows the mapping, `/api/audio/info` publishes the cache identity) | verified by tests against real WAV bytes |
+| Browser client lifecycle wiring (per-trial buffer cache, stop at N, seal control, redaction note) | **UNVERIFIED in a browser.** No page was opened, no audio was played; `node --check` passes and the contract is asserted statically in `tests/test_web_client_lifecycle.py` |
+| Desktop lifecycle wiring (seal button, N/canary freeze, score panel, export stamps, prepared-audio hash, export guard) | **UNVERIFIED — the app cannot be launched here** (`libGL.so.1`). `app/main.py` parses, its i18n keys are parity-checked, and its structure is asserted in `tests/test_desktop_lifecycle_ui.py`; `ABXStats` fields it reads are checked through the shim |
+| Real playback of the correctly-mapped audio by a human ear | **never performed** — the web inversion is proven on served bytes, not on heard sound |
 | **Desktop app has never been executed** | **UNVERIFIED.** Needs `libgl1` + `libportaudio2`. `main.py` is compile-checked; its logic is tested through the shim, not run |
 | Web single-session limitation | documented, **not fixed** |
 | Real listening test end-to-end by a human | never done — including passing a real canary trial |
@@ -104,6 +151,39 @@ Each has a test. Do not "simplify" these away:
   `MainWindow()` raised `AttributeError` — the desktop app has never been
   runnable, not just untested. Both are defined now, and engine construction
   happens in one place so the two gates cannot be skipped by one call site.
+- **The web served the trial's A/B audio WITHOUT that trial's display mapping.**
+  The engine produced a per-trial mapping, `SessionState.side_audio_path()`
+  resolved the raw physical paths, and the browser cached one decoded A/B pair for
+  the whole session. In `blind_random` a swapped trial played the *other* pair: a
+  listener who identified X perfectly by ear was scored wrong (reproduced with
+  real bytes: `the listener identified X by ear from the served audio and was
+  scored wrong`). The calibration pair had the same inversion, so the known-answer
+  gate was inverted for half of blind runs. → the serving layer resolves the
+  mapping once (canary included), and the client caches buffers per
+  (prepared audio, calibration mode, mapping).
+  → `tests/test_web_playback_mapping.py`, `tests/test_web_client_lifecycle.py`.
+- **Nothing bounded a run.** Trials continued past the pre-registered N, the
+  planned N / label mode / calibration switch / pipelines were editable while a
+  run was under way (N only after the *first answer*, so a staged — already
+  exposed — trial was editable), a mid-run export leaked the secret for the trials
+  still to come, and a run stopped early at n=7 of 16 printed as
+  `PROVISIONAL`/`significant` with no marker in the export saying it was not a
+  finished study. → lifecycle in `core/abx.py` (invariant 7): stop at N, freeze
+  the plan at the first staged trial, redact while answers are due, `SEALED` for a
+  run stopped early, `significant_verdict` as the only claimable pass, and
+  `POST /api/trial/seal` as the honest early-export path.
+  → `tests/test_study_lifecycle.py`, `tests/test_pipeline_ffmpeg.py`.
+- **A rendered pair survived the configuration that produced it.** Changing the
+  pipeline (or the input) after preprocessing left the old WAVs in place, so the
+  null gate, the calibration material and the answers all described audio the new
+  configuration no longer produces. → `/api/config` fingerprints the render and
+  drops the pair (with the reason) when it changes; N and the label mode are
+  deliberately outside the fingerprint, so registering a different N does not
+  force a re-render.
+- **The desktop blocked the export of a calibration-only run.** `if not
+  self.logger.trials` is empty when a run dies at the calibration trial (the
+  canary is recorded in the session block, not the scored table) — precisely the
+  run that must stay exportable. → the guard reads `engine.all_trials()`.
 - **Streak-based blinding was predictable.** web `0.1*streak` cap 0.5; desktop
   `0.5 + 0.07*streak` cap **0.88** — above 50% the mapping is anti-persistent.
 - Metric conventions that were traps: perfect null returned `+inf` (deepest null
@@ -124,9 +204,9 @@ Each has a test. Do not "simplify" these away:
 ## Commands
 
 ```bash
-.venv/bin/python -m pytest -q                    # 177 passed (ffmpeg present)
-.venv/bin/python -m pytest -q -m "not pipeline"  # 164 passed, 13 deselected — no ffmpeg
-.venv/bin/python -m pytest -q -m pipeline        # 13 — needs ffmpeg + pyloudnorm + soundfile
+.venv/bin/python -m pytest -q                    # 274 passed (ffmpeg present)
+.venv/bin/python -m pytest -q -m "not pipeline"  # 245 passed, 29 deselected
+.venv/bin/python -m pytest -q -m pipeline        # 29 passed, 245 deselected; audio deps required
 .venv/bin/python -m compileall -q core app web tests
 ~/.local/bin/node --check web/static/js/app.js   # the web shell has no JS test runner
 ```
@@ -162,18 +242,142 @@ Each has a test. Do not "simplify" these away:
    shareable, byte-reproducible run. Then commit-reveal is already in place to
    make published results verifiable.
 
+## Phase 2 — study lifecycle and the playback contract (DONE)
+
+Correctness before features: a run is now a bounded, named, auditable thing, and
+the audio the listener hears is the audio the score describes.
+
+1. **Lifecycle in `core/abx.py`** (invariant 7): `configured → running →
+   completed | aborted`; stop exactly at N; plan frozen from the first staged
+   trial (engine-enforced, `__setattr__` + named setters); prepared-audio
+   identity frozen for the run; `reveal()` redacted while answers are due;
+   `abort`/`seal` as the distinct, labelled early ending; `is_final` only at N;
+   `significant_verdict` as the claimable pass. The shells enforce nothing
+   themselves — the desktop shim converts the same rules into status-bar text,
+   the web returns the same rules as 409 + `reasons`.
+2. **The seal is the honest early export.** Mid-run export = REDACTED
+   (commitment + answered rows, no secret). Sealed export = verifiable and
+   labelled `SEALED … not a result`. `POST /api/trial/seal` + the web/desktop
+   controls.
+3. **Rendered audio is owned by the configuration that rendered it**: fingerprint
+   → invalidate → trials refuse to start until re-render; prepared-audio digest +
+   `run_lock` stamped into every export.
+4. **One mapping owner** (invariant 8): serving layer maps, client plays bytes,
+   browser caches per (prepared audio, calibration mode, mapping).
+
+**Accepted UX tightening, deliberate:** the config freeze triggers at the first
+*staged* trial (a published commitment and playable audio), stricter than the old
+desktop rule "an answer exists"; N, label mode, calibration switch and pipelines
+are all editable only before the first trial starts or after an explicit reset.
+Completed and sealed runs stay frozen until reset; preprocessing and upload
+cannot silently discard that frozen run.
+
+## Phase 3 — unified audio preparation (DONE)
+
+The previous preparation handover scope is implemented; the refreshed
+[HANDOVER_PROMPT.md](HANDOVER_PROMPT.md) now describes the next task. Regression
+tests were written and observed failing before fixing channels, loudness,
+processing order, and FLAC probing. No browser, server, desktop window or human
+listening test was run.
+
+- **One headless pipeline:** the web worker now calls
+  [AudioPipeline](app/audio_pipeline.py), the same preparation implementation as
+  desktop, with explicit enum/stage adaptation. The independent web codec,
+  bandwidth, alignment, loudness-parser and gain/`agate` implementations are gone.
+- **Shared backend-free policy:** [core/preparation.py](core/preparation.py) owns
+  `LoudnessReport`, channel checks, sample-rate selection, normalization/common
+  trim, delivered remeasurement, and the exported processing order. It imports
+  stdlib + numpy only. [app/models.py](app/models.py) re-exports the report type
+  for compatibility. DSP backends remain outside core.
+- **Channels:** `preserve_source_mono_or_stereo`; unsupported inputs or decoder
+  channel-count changes fail rather than silently downmix. A/B and both canary
+  files preserve the same channels. The convention is disclosed in both shells;
+  web JSON also stamps it beside the delivered channel count.
+- **Real loudness:** both pipelines measure with `pyloudnorm` (BS.1770), apply
+  independent constant gains and ONE common sample-peak trim, write PCM16, then
+  reload the delivered files. Post-LUFS, residual, peaks, null gate, desktop
+  playback arrays and canary source refer to that delivered PCM, not ideal
+  pre-serialization floats. There is no gain clamp, amplitude gate or limiter.
+  One PCM16 quantum of positive headroom prevents writer clipping. Common trim
+  may leave delivery below the -16 LUFS target: the actual levels and trim are
+  reported, not overwritten with the target.
+- **Web citation artifact:** `session_metadata.loudness` and the JSON session's
+  `loudness` contain pre/post LUFS, gains, common trim, target, `pre_delta_db` and
+  the measured `residual_delta_db` without rounding. Diagnostics consume this
+  report directly; absent measurement means absent loudness lines, never a
+  fabricated zero. Legacy loudness fields keep their pre-normalization meaning.
+- **Order:** probe source → select target rate → working PCM16 → codec chains →
+  bounded alignment/crop → bandwidth limits → pre-LUFS → constant gains → common
+  peak trim → PCM16 write/reload → delivered measurements/validity gates → canary
+  from delivered A. No web-only `agate` remains. The order is exported.
+- **FLAC:** probe the original input before decoding. Native 96 kHz stays 96 kHz;
+  force-48k delivers 48 kHz while still exporting original 96 kHz. Codec-internal
+  rate constraints use the desktop implementation and resampler disclosure.
+- **Stereo null measurements:** residual energy now includes every delivered
+  channel. Downmixing could cancel anti-phase stereo material and hide a
+  residual; a regression catches this. The lag estimator still uses a mono
+  correlation probe; strongly anti-phase material can yield a weak estimate and
+  warning (not a claim of confirmed alignment).
+- **Lifecycle preserved at preparation:** preprocess refuses staged/running,
+  completed and sealed runs until explicit reset. It drops old playable audio
+  synchronously. Upload/config changes are locked during preparation; upload is
+  also locked for a frozen run. Cancellation reaches the active pipeline, and a
+  late cancellation or config mismatch cannot publish audio. Unpublished work
+  directories are removed. Successful render directories still live for the
+  process/session lifetime; there is no full storage-retention policy yet.
+- **Dependencies:** [requirements-audio.txt](requirements-audio.txt) is shared by
+  web and desktop without pulling Qt/playback into web. Worker imports are lazy,
+  preserving API-only imports without audio extras. The Docker recipe copies the
+  shared requirements and `core/`; no container was built or run here.
+- **New evidence:** [tests/test_preparation_parity.py](tests/test_preparation_parity.py)
+  uses real PCM and isolated session state; an injected asymmetric delivery gain
+  proves the residual is remeasured rather than stamped. Native 44.1 kHz Opus
+  and aptX round trips match desktop PCM exactly; missing libldac refuses rather
+  than substituting. High-crest material exercises a real common peak trim, and
+  silent/short inputs produce no fabricated report. Backend-free policies and
+  preparation/lifecycle safety have separate regression modules. The existing
+  web-canary decoder test helper now retains every channel, strengthening the
+  check rather than hiding residuals in a mono downmix.
+
+**Local verification this pass:** baseline 237/224/13 passed before changes.
+Final full suite: **274 passed** (88.51 s); non-pipeline: **245 passed, 29
+deselected** (13.88 s); pipeline: **29 passed, 245 deselected** (74.59 s).
+`compileall` over core/app/web/tests, `node --check` and `git diff --check` pass.
+A separate read-only review found no remaining scoped blocker. No Docker build,
+browser, desktop launch, listening or system installation was performed.
+
+Deliberate limits: mono/stereo only; no loudness artifact for silent/below-gate or
+meter-too-short clips (preparation reports an error rather than exporting NaN or
+an RMS approximation). The legacy `true_peak_dbfs` field is a **sample peak**, not
+an oversampled true peak; the disclosure now names this limitation. No validity
+threshold was loosened, and no previous assertion was weakened.
+
 ## Open items / non-goals
 
+- Sealing a run is destructive to the session's in-memory trials: the web seal
+  button exports the file first, and a closed run's configuration is frozen
+  (the client offers "start a new run" over the same rendered pair). The desktop
+  seal prompt, the button states and the export dialogs have never been
+  exercised — `app/main.py` cannot be imported here (`libGL.so.1`).
+- A CSV of a calibration-only run is a header with no rows: the scored-trial
+  table is by definition empty. The JSON export is the citation artifact for
+  that case (it carries `canary`, `gates`, `null_gate` and the verdict).
+- Blind mode refetches the A/B WAVs when a trial's mapping swaps (the bytes
+  differ), so the first play of a swapped trial costs one fetch+decode. Fixed
+  mode keeps the instant-switch cache. If the 24-bit WAVs grow, that fetch is
+  the thing to make streaming — not the cache.
 - `holm_bonferroni` is in `core/stats.py` and tested, but **not wired** —
   multiplicity correction needs a UI concept of a comparison family (Phase 1+).
 - Bandwidth-limit cutoffs are fixed at 14/16/18 kHz by design.
-- Web audio is mono internally (`load_wav_float` forces `-ac 1`); desktop is
-  stereo. Unify before claiming stereo results on web.
-  - The same split shows in the calibration pair: the pristine side is a byte
-    copy of the delivered (stereo PCM_16) Side A, the degraded side is built
-    from the mono render. Measured residual +0.79 dB, far above the −30 dB
-    floor, so the gate is sound — but the two sides are not channel-identical
-    until the convention above is unified.
-- The web pipeline still has no `LoudnessReport`; it reports pre-normalization
-  delta and gains in metadata, and a residual of 0.0 (not re-measured).
+- Canary audibility metadata is still measured on the generated degraded float
+  before its PCM16 serialization; served-PCM regressions confirm the gross
+  difference, but the exported canary measurement is not a reread of both files.
+  This is separate from post-normalization LUFS/null measurements, which now
+  do use the delivered PCM.
+- CI still masks failures with `|| echo` and lacks the audio-test dependencies;
+  local pipeline verification below must not be mistaken for CI coverage.
+- The next recommended task is real playback/listening validation, including a
+  canary, channel routing, instantaneous switches and a sealed export. After
+  that: per-session web state, output-path/Bluetooth disclosure, reproducible
+  study specifications/provenance, Holm wiring, then README/DESIGN refresh.
 - No git remote is configured; everything is local on `master`.

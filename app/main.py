@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sys
+import hashlib
+import json
 import random
 import shutil
 import tempfile
@@ -22,6 +24,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -154,6 +157,19 @@ TRANSLATIONS = {
         "diag_null_gate": "Null gate (identical-pair check)",
         "diag_canary": "Calibration (canary) trial",
         "diag_run_void": "RUN VOID",
+        "diag_run_sealed": "RUN SEALED (stopped early)",
+        "run_sealed_status": "Run sealed: stopped early. Auditable, not a result.",
+        "run_complete_status": "Run complete: pre-registered N reached. No further trials.",
+        "run_gate_status": "A validity gate closed: no further trials for this run.",
+        "seal_run_btn": "End run now (seal)",
+        "seal_run_tooltip": (
+            "Stop the run for good. The export becomes verifiable (it carries "
+            "the secret) and is labelled a sealed partial run, never a result. "
+            "While answers are still due, an export is REDACTED: the secret "
+            "derives X for every trial not yet answered."
+        ),
+        "seal_run_prompt": "Sealing stops this run permanently and labels it a sealed partial run (auditable, not a result). Why are you stopping?",
+        "config_frozen_alert": "The configuration is frozen while this run is under way. Seal the run (auditable, not a result) or reset it first.",
         "canary_enable": "Calibration trial (canary) gates this session",
         "canary_tooltip": (
             "Trial 1 is a deliberately-easy trial with a known answer: X is "
@@ -328,6 +344,19 @@ TRANSLATIONS = {
         "diag_null_gate": "Cổng null (kiểm tra cặp giống hệt nhau)",
         "diag_canary": "Lượt hiệu chuẩn (canary)",
         "diag_run_void": "LƯỢT CHẠY BỊ HỦY",
+        "diag_run_sealed": "LƯỢT CHẠY ĐÃ ĐÓNG (dừng sớm)",
+        "run_sealed_status": "Lượt chạy đã đóng: dừng sớm. Kiểm chứng được, không phải kết quả.",
+        "run_complete_status": "Lượt chạy hoàn tất: đã đạt N đã đăng ký. Không còn lượt thử.",
+        "run_gate_status": "Một cổng kiểm định đã đóng: không còn lượt thử cho lượt chạy này.",
+        "seal_run_btn": "Kết thúc lượt chạy ngay (đóng)",
+        "seal_run_tooltip": (
+            "Dừng lượt chạy vĩnh viễn. Tệp xuất trở nên kiểm chứng được (mang "
+            "theo secret) và bị đánh dấu là lượt chạy dở dang đã đóng, không "
+            "bao giờ là kết quả. Khi còn lượt trả lời đang chờ, tệp xuất bị "
+            "CHE GIẤU: secret suy ra X của mọi lượt chưa trả lời."
+        ),
+        "seal_run_prompt": "Đóng sẽ dừng lượt chạy này vĩnh viễn và đánh dấu nó là lượt chạy dở dang đã đóng (kiểm chứng được, không phải kết quả). Lý do dừng?",
+        "config_frozen_alert": "Cấu hình bị đóng băng khi lượt chạy đang diễn ra. Hãy đóng lượt chạy (kiểm chứng được, không phải kết quả) hoặc reset trước.",
         "canary_enable": "Lượt hiệu chuẩn (canary) chặn phiên này",
         "canary_tooltip": (
             "Lượt 1 là lượt cố tình rất dễ và đáp án đã biết: X là bản sạch "
@@ -1284,6 +1313,8 @@ class MainWindow(QMainWindow):
         self.answer_a.setText(self._t("x_eq_a"))
         self.answer_b.setText(self._t("x_eq_b"))
         self.cancel_session_btn.setText(self._t("cancel_abx"))
+        self.seal_run_btn.setText(self._t("seal_run_btn"))
+        self.seal_run_btn.setToolTip(self._t("seal_run_tooltip"))
         self.planned_trials_label.setText(self._t("planned_n"))
         self.planned_trials_spin.setToolTip(self._t("planned_n_tooltip"))
         self.canary_check.setText(self._t("canary_enable"))
@@ -1704,6 +1735,14 @@ class MainWindow(QMainWindow):
         self.cancel_session_btn = QPushButton(self._t("cancel_abx"))
         self.cancel_session_btn.clicked.connect(self.on_cancel_session)
 
+        # Seal: end the run on purpose. This is the honest early-export path --
+        # while answers are still due the export is REDACTED, because the secret
+        # derives X for every trial not yet answered. Sealing closes the run,
+        # which releases the key and labels the run a sealed partial run.
+        self.seal_run_btn = QPushButton(self._t("seal_run_btn"))
+        self.seal_run_btn.setToolTip(self._t("seal_run_tooltip"))
+        self.seal_run_btn.clicked.connect(self.on_seal_run)
+
         abx_row.addWidget(self.trial_label, 0, 0)
         abx_row.addWidget(self.score_label, 0, 1)
         abx_row.addWidget(self.pvalue_label, 0, 2)
@@ -1713,6 +1752,7 @@ class MainWindow(QMainWindow):
         abx_row.addWidget(self.answer_a, 1, 0)
         abx_row.addWidget(self.answer_b, 1, 1)
         abx_row.addWidget(self.cancel_session_btn, 1, 2)
+        abx_row.addWidget(self.seal_run_btn, 1, 3)
         abx_row.addWidget(self.gate_status_label, 2, 0, 1, 6)
         layout.addLayout(abx_row)
         return g
@@ -1922,6 +1962,57 @@ class MainWindow(QMainWindow):
         self._set_status(self._t("status_cancelling_prepare"))
         self.pipeline.request_cancel()
 
+    @staticmethod
+    def _audio_config_fingerprint(prepared, canary_enabled: bool) -> str:
+        """Fingerprint of the configuration that produced the delivered pair.
+
+        Deliberately excludes N and the label-mapping mode: those shape the
+        trial plan, not the audio, so changing the registered trial count does
+        not invalidate a rendered pair. Codec identities and bitrates, stage
+        counts, bandwidth limits, the sample-rate mode and the calibration
+        switch DO: they are what was measured.
+        """
+        payload = {
+            "input_file": str(prepared.input_file),
+            "sample_rate_mode": prepared.mode.value,
+            "processing_mode": prepared.processing_mode.value,
+            "target_sample_rate": prepared.target_sample_rate,
+            "codec_a": prepared.track_a.codec_name,
+            "codec_b": prepared.track_b.codec_name,
+            "bitrate_a_kbps": prepared.track_a.bitrate_kbps,
+            "bitrate_b_kbps": prepared.track_b.bitrate_kbps,
+            "stages_a": prepared.pipeline_stage_count_a,
+            "stages_b": prepared.pipeline_stage_count_b,
+            "bandwidth_limit_a_enabled": prepared.bandwidth_limit_a_enabled,
+            "bandwidth_limit_a_hz": prepared.bandwidth_limit_a_hz,
+            "bandwidth_limit_b_enabled": prepared.bandwidth_limit_b_enabled,
+            "bandwidth_limit_b_hz": prepared.bandwidth_limit_b_hz,
+            "canary_enabled": bool(canary_enabled),
+        }
+        blob = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+    def prepared_audio_identity(self, arr_a, arr_b, prepared) -> dict:
+        """Identity of the exact audio this run is locked to.
+
+        The digest covers the buffers handed to the player, so the export names
+        the bytes the listener heard -- not a file that may have been re-rendered
+        since. Recording it on the engine freezes it: `set_prepared_audio`
+        refuses once a run is under way, so a run in flight cannot be quietly
+        moved onto different audio.
+        """
+        a_sha = hashlib.sha256(bytes(arr_a.tobytes())).hexdigest()
+        b_sha = hashlib.sha256(bytes(arr_b.tobytes())).hexdigest()
+        fingerprint = self._audio_config_fingerprint(prepared, self._canary_requested())
+        digest = hashlib.sha256(f"{a_sha}|{b_sha}|{fingerprint}".encode()).hexdigest()[:32]
+        return {
+            "id": "sha256:" + digest,
+            "a_sha256": a_sha,
+            "b_sha256": b_sha,
+            "config_fingerprint": fingerprint,
+            "target_sample_rate": prepared.target_sample_rate,
+        }
+
     def _on_prepare_done(self, prepared, arr_a, arr_b) -> None:
         stamp = self._active_stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -1934,6 +2025,14 @@ class MainWindow(QMainWindow):
 
         mapping_mode = self._mapping_mode_pending
         self.engine = self._make_engine(mapping_mode)
+        # The run is locked to the audio just rendered: the engine records its
+        # identity and freezes it, so no answer in this run can be describing a
+        # pair that was quietly re-rendered underneath it.
+        prepared_audio = self.prepared_audio_identity(arr_a, arr_b, prepared)
+        self.engine.set_prepared_audio(
+            prepared_audio["id"],
+            **{k: v for k, v in prepared_audio.items() if k != "id"}
+        )
         self._sync_player_x_mapping()
 
         self.logger = ExperimentLogger()
@@ -1958,6 +2057,7 @@ class MainWindow(QMainWindow):
                 "bitrate_b_kbps": prepared.track_b.bitrate_kbps,
                 "ab_label_mapping_mode": mapping_mode,
                 "ab_label_mapping": self.engine.display_mapping,
+                "prepared_audio": prepared_audio,
                 "validation": asdict(prepared.validation),
                 "track_a": asdict(prepared.track_a),
                 "track_b": asdict(prepared.track_b),
@@ -1991,24 +2091,33 @@ class MainWindow(QMainWindow):
         self._refresh_diagnostics_panel()
 
     # ── engine construction and validity gates ──────────────────────────────
-    def _on_canary_toggled(self, _state: int) -> None:
+    def _on_canary_toggled(self, state: int) -> None:
         """The calibration gate is a session property, not a per-trial one.
 
         Toggling it mid-run would silently change what trial 1 means, so the
-        engine is only rebuilt while nothing has been answered; afterwards the
-        change applies to the next session and says so.
+        engine is only rebuilt while nothing has been staged or answered;
+        afterwards the change applies to the next session and says so. "Staged"
+        counts, because a staged trial has a published commitment and playable
+        audio: rebuilding the engine under it would drop the commitment the
+        answers are being scored against. The checkbox snaps back, so the panel
+        never describes a gate the running session does not have.
         """
         self._refresh_gate_status()
         engine = getattr(self, "engine", None)
         if engine is None:
             return
         status = engine.canary_block().get("status")
-        idle = engine.stats().total_trials == 0 and status in (
+        idle = (not engine.run_under_way()) and status in (
             "not_configured",
             "pending",
         )
         if not idle:
             self._set_status(self._t("canary_applies_next_session"))
+            checkbox = getattr(self, "canary_check", None)
+            if checkbox is not None:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(not bool(int(state)))
+                checkbox.blockSignals(False)
             return
         self._make_engine()
 
@@ -2066,19 +2175,26 @@ class MainWindow(QMainWindow):
         Refusing a change mid-run is the point: redrawing the pass criterion
         after seeing the data is exactly how a p-value stops meaning anything.
         The spin snaps back and the reason is stated.
+
+        The rule lives in core (which names the frozen fields and raises
+        `ConfigLocked`), not in this handler: the trigger is the first staged
+        trial -- the moment the commitment is published and the audio can be
+        played -- which is stricter than "an answer exists", because a staged
+        trial has already been exposed to the listener.
         """
         engine = getattr(self, "engine", None)
         if engine is None:
             return
-        if engine.stats().total_trials > 0:
-            registered = engine.planned_trials
+        registered = engine.planned_trials
+        engine.config_locked = False
+        engine.set_planned_trials(int(value) if int(value) > 0 else None)
+        if engine.config_locked:
             self._set_status(self._t("planned_n_locked"))
             spin = self.planned_trials_spin
             spin.blockSignals(True)
             spin.setValue(int(registered) if registered else int(value))
             spin.blockSignals(False)
             return
-        engine.set_planned_trials(int(value) if int(value) > 0 else None)
         self._refresh_diagnostics_panel()
 
     def _sync_engine_audio_mode(self) -> None:
@@ -2326,6 +2442,42 @@ class MainWindow(QMainWindow):
             )
             self._set_status(self._t("diag_run_void"))
 
+    def on_seal_run(self) -> None:
+        """End the run on purpose, so an early export can be honest.
+
+        An export taken while answers are still due is REDACTED: the secret
+        derives X for every trial that has not been answered, so publishing it
+        early would leak the rest of the study. Sealing closes the run, which
+        releases the key and makes the export verifiable -- and labels the run
+        what it is: a sealed partial run, never a result. The engine owns that
+        decision; this button only asks for it.
+        """
+        if self.prepared_session is None:
+            QMessageBox.warning(
+                self, self._t("prepare_first_title"), self._t("prepare_first_text")
+            )
+            return
+
+        stats = self.engine.stats()
+        if stats.sealed:
+            # Nothing to do: the run is already closed and its export is
+            # verifiable. Say so instead of re-sealing a finished run.
+            self._set_status(self._t("run_sealed_status"))
+            QMessageBox.information(self, self._t("seal_run_btn"), self._t("run_sealed_status"))
+            return
+
+        reason, ok = QInputDialog.getText(
+            self, self._t("seal_run_btn"), self._t("seal_run_prompt")
+        )
+        if not ok:
+            return
+        self.player.stop()
+        self.engine.seal(reason.strip() or "sealed by the tester")
+        self._update_score_ui()
+        self._refresh_gate_status()
+        self._refresh_diagnostics_panel()
+        self._set_status(self._t("run_sealed_status"))
+
     def on_cancel_session(self) -> None:
         self.player.stop()
         self.player.set_position_seconds(0.0)
@@ -2393,6 +2545,13 @@ class MainWindow(QMainWindow):
                 "is_final": stats.is_final,
                 "required_correct": stats.required_correct,
                 "ability_ci95": stats.ability_ci95,
+                # Lifecycle reaches the shared wording too, so the desktop
+                # panel says SEALED, never FINAL, for a run stopped early --
+                # the same sentence the web panel and the JSON export print.
+                "lifecycle": stats.lifecycle,
+                "sealed": stats.sealed,
+                "complete": stats.complete,
+                "total_trials": stats.total_trials,
             },
             commitment=self.engine.session_commitment,
             # Phase 1 gates: same blocks, same wording as the web diagnostics
@@ -2529,11 +2688,29 @@ class MainWindow(QMainWindow):
         # verdict: that is the optional-stopping / p-hacking affordance.
         self.pvalue_label.setText(f"{self._t('pvalue')}: {s.p_value_text.split(': ', 1)[-1]}")
         if s.planned_trials:
+            # A sealed run is not "provisional" either: it has stopped, and its
+            # partial p-value is a description of a run that will not finish.
+            state = "final" if s.is_final else ("sealed" if s.sealed else "provisional")
             self.pvalue_label.setText(
                 f"{self._t('pvalue')}: {s.p_value_one_tailed:.5f} "
-                f"({'final' if s.is_final else 'provisional'}, "
+                f"({state}, "
                 f"need >={s.required_correct}/{s.planned_trials})"
             )
+
+        # Lifecycle. `can_accept_answers` is core's answer, and core also
+        # refuses the trial, so disabling these buttons is a courtesy that keeps
+        # the listener from clicking into a refusal -- never the rule that
+        # bounds the run.
+        can_answer = s.can_accept_answers
+        self.answer_a.setEnabled(can_answer)
+        self.answer_b.setEnabled(can_answer)
+        self.seal_run_btn.setEnabled(can_answer)
+        if s.sealed:
+            self._set_status(self._t("run_sealed_status"))
+        elif not can_answer and s.lifecycle == "completed":
+            self._set_status(self._t("run_complete_status"))
+        elif not can_answer:
+            self._set_status(self._t("run_gate_status"))
 
     def _refresh_transport(self) -> None:
         if self.prepared_session is None:
@@ -2572,13 +2749,14 @@ class MainWindow(QMainWindow):
         """
         prepared = self.prepared_session
         stats = self.engine.stats()
+        reveal = self.engine.reveal()
         disclosure = dict(getattr(prepared, "disclosure", {}) or {}) if prepared else {}
         disclosure["audio_device"] = {
             "exclusive_mode_requested": self.exclusive_mode.isChecked(),
         }
         self.logger.seal(
             disclosure=disclosure,
-            verifiability=self.engine.reveal(),
+            verifiability=reveal,
             statistics={
                 "total_trials": stats.total_trials,
                 "correct_trials": stats.correct_trials,
@@ -2587,11 +2765,24 @@ class MainWindow(QMainWindow):
                 "is_final": stats.is_final,
                 "provisional": stats.provisional,
                 "required_correct": stats.required_correct,
+                # Raw arithmetic stays as it was; `significant_verdict` is the
+                # claimable form of it -- significant AND a finished, valid run.
                 "significant": stats.significant,
+                "significant_verdict": stats.significant_verdict,
                 "ability_ci95": stats.ability_ci95,
                 "void": stats.void,
                 "run_valid": stats.run_valid,
                 "verdict": stats.verdict,
+                # Lifecycle: `is_final` is true only at the pre-registered N, so
+                # a run stopped early is `incomplete` and can never be read as a
+                # completed study by whoever opens this file.
+                "lifecycle": stats.lifecycle,
+                "complete": stats.complete,
+                "sealed": stats.sealed,
+                "sealed_reason": stats.sealed_reason,
+                "incomplete": not stats.complete,
+                "can_accept_answers": stats.can_accept_answers,
+                "run_closed_because": stats.run_closed_because,
             },
             # Phase 1 gates: the export says what was verified before any trial
             # counted, and a failed gate voids the run in the file itself.
@@ -2602,10 +2793,24 @@ class MainWindow(QMainWindow):
             null_gate=self.engine.null_gate_block(),
             gates=self.engine.gates(),
             run_valid=self.engine.run_valid,
+            # Which audio the verdict describes, and the plan it was run under.
+            prepared_audio=self.engine.prepared_audio,
+            run_lock=self.engine.run_lock,
+            export_is_redacted=bool(reveal.get("redacted")),
         )
 
+    def _has_any_record(self) -> bool:
+        """Anything recorded at all: scored trials, or the calibration trial.
+
+        A run that answered ONLY the calibration trial has no scored rows, and
+        it is exactly the run that must stay exportable: a failed calibration is
+        a result worth publishing, and the way failed runs get quietly dropped
+        is by having no way out of the tool.
+        """
+        return bool(self.logger.trials) or bool(self.engine.all_trials())
+
     def on_export_json(self) -> None:
-        if not self.logger.trials:
+        if not self._has_any_record():
             QMessageBox.information(self, self._t("nothing_export_title"), self._t("nothing_export_text"))
             return
 
@@ -2625,7 +2830,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, self._t("export_failed_title"), str(exc))
 
     def on_export_csv(self) -> None:
-        if not self.logger.trials:
+        if not self._has_any_record():
             QMessageBox.information(self, self._t("nothing_export_title"), self._t("nothing_export_text"))
             return
 

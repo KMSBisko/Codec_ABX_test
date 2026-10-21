@@ -1,0 +1,655 @@
+/* ═══════════════════════════════════════════════════════════════
+   Codec ABX Tester — Web Edition Stylesheet
+   Themes: Light / Dark / OLED | Zoom support | Responsive
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── CSS Custom Properties (Theme Tokens) ─────────────────────── */
+
+/* Light Theme (default) */
+body.theme-light {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f5f5f5;
+    --bg-panel: #fafafa;
+    --text-primary: #1a1a1a;
+    --text-secondary: #555555;
+    --border-color: #dddddd;
+    --accent-color: #0066cc;
+    --accent-hover: #0052a3;
+    --success-color: #28a745;
+    --warning-color: #ffc107;
+    --error-color: #dc3545;
+    --btn-bg: #e9ecef;
+    --btn-hover: #dde2e6;
+    --audio-a-bg: #d4edda;
+    --audio-b-bg: #cce5ff;
+    --audio-x-bg: #fff3cd;
+    --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Dark Theme */
+body.theme-dark {
+    --bg-primary: #1e1e1e;
+    --bg-secondary: #2d2d2d;
+    --bg-panel: #252526;
+    --text-primary: #e0e0e0;
+    --text-secondary: #aaaaaa;
+    --border-color: #404040;
+    --accent-color: #4da6ff;
+    --accent-hover: #3d94e5;
+    --success-color: #4caf50;
+    --warning-color: #ffca28;
+    --error-color: #ef5350;
+    --btn-bg: #3a3a3c;
+    --btn-hover: #4a4a4c;
+    --audio-a-bg: #1b3a2a;
+    --audio-b-bg: #1b2d3a;
+    --audio-x-bg: #3a3520;
+    --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* OLED Theme */
+body.theme-oled {
+    --bg-primary: #000000;
+    --bg-secondary: #111111;
+    --bg-panel: #0a0a0a;
+    --text-primary: #f0f0f0;
+    --text-secondary: #999999;
+    --border-color: #333333;
+    --accent-color: #5c9dff;
+    --accent-hover: #4a8def;
+    --success-color: #3dd680;
+    --warning-color: #ffd54f;
+    --error-color: #ff5252;
+    --btn-bg: #1a1a1a;
+    --btn-hover: #2a2a2a;
+    --audio-a-bg: #0d261a;
+    --audio-b-bg: #0d1b26;
+    --audio-x-bg: #262008;
+    --shadow: 0 2px 8px rgba(0, 0, 0, 0.7);
+}
+
+/* ── Reset & Base ─────────────────────────────────────────────── */
+
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+    transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* ── Toolbar ──────────────────────────────────────────────────── */
+
+.toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 24px;
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.app-title {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--accent-color);
+}
+
+.toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.toolbar-btn {
+    padding: 6px 12px;
+    background: var(--btn-bg);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+}
+
+.toolbar-btn:hover {
+    background: var(--btn-hover);
+}
+
+.icon-btn {
+    padding: 6px 10px;
+    font-size: 1.1rem;
+}
+
+.zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.zoom-label {
+    min-width: 45px;
+    text-align: center;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+/* ── Main Content ─────────────────────────────────────────────── */
+
+main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 24px;
+}
+
+.panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 24px;
+    box-shadow: var(--shadow);
+}
+
+.panel h2 {
+    font-size: 1.3rem;
+    margin-bottom: 16px;
+    color: var(--accent-color);
+    border-bottom: 2px solid var(--border-color);
+    padding-bottom: 8px;
+}
+
+.panel h3 {
+    font-size: 1.1rem;
+    margin: 16px 0 12px;
+    color: var(--text-primary);
+}
+
+/* ── Form Elements ────────────────────────────────────────────── */
+
+.form-group {
+    margin-bottom: 16px;
+}
+
+.form-group label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.form-row {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.form-row .form-group,
+.form-row .pipeline-config {
+    flex: 1;
+    min-width: 280px;
+}
+
+select, input[type="number"], input[type="text"] {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+select:focus, input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px rgba(0, 102, 204, 0.2);
+}
+
+/* ── File Upload Area ─────────────────────────────────────────── */
+
+.file-upload-area {
+    border: 2px dashed var(--border-color);
+    border-radius: 8px;
+    padding: 32px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.3s ease, background-color 0.3s ease;
+}
+
+.file-upload-area:hover {
+    border-color: var(--accent-color);
+    background-color: var(--bg-secondary);
+}
+
+.file-upload-area input[type="file"] {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.file-name {
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+}
+
+/* ── Pipeline Configuration ───────────────────────────────────── */
+
+.pipeline-config {
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    padding: 16px;
+}
+
+.pipeline-config label {
+    font-weight: 700;
+    display: block;
+    margin-bottom: 8px;
+}
+
+.stages-container {
+    min-height: 40px;
+    margin-bottom: 8px;
+}
+
+.stage-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.stage-row select {
+    flex: 1;
+}
+
+.stage-remove-btn {
+    padding: 4px 8px;
+    background: var(--error-color);
+    color: #fff;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+/* ── Bandwidth Limit Controls ─────────────────────────────────── */
+
+.bandwidth-limit {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+.bw-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+}
+
+.bw-controls input[type="number"] {
+    width: 120px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────── */
+
+.btn {
+    padding: 10px 20px;
+    background: var(--btn-bg);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    font-weight: 500;
+    transition: background-color 0.2s ease, transform 0.1s ease;
+}
+
+.btn:hover {
+    background: var(--btn-hover);
+}
+
+.btn:active {
+    transform: scale(0.98);
+}
+
+.btn-primary {
+    background: var(--accent-color);
+    color: #fff;
+    border-color: var(--accent-color);
+}
+
+.btn-primary:hover {
+    background: var(--accent-hover);
+}
+
+.btn-warning {
+    background: var(--warning-color);
+    color: #1a1a1a;
+}
+
+.btn-sm {
+    padding: 6px 12px;
+    font-size: 0.85rem;
+}
+
+/* ── Progress Bar ─────────────────────────────────────────────── */
+
+.progress-area {
+    margin-top: 16px;
+}
+
+.progress-bar-container {
+    width: 100%;
+    height: 24px;
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+}
+
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-color), #4da6ff);
+    transition: width 0.3s ease;
+    border-radius: 12px;
+}
+
+.progress-message {
+    display: block;
+    margin-top: 8px;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+/* ── Validation Results ───────────────────────────────────────── */
+
+.validation-result {
+    margin-top: 16px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+}
+
+.validation-result h4 {
+    margin-bottom: 8px;
+}
+
+#validationNotes {
+    list-style: disc inside;
+    color: var(--text-secondary);
+}
+
+/* ── ABX Playback Section ─────────────────────────────────────── */
+
+.trial-info {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.audio-buttons {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin-bottom: 20px;
+}
+
+.btn-audio {
+    min-width: 140px;
+    font-size: 1.1rem;
+    padding: 16px 24px;
+    border-width: 2px;
+}
+
+.btn-side-a {
+    background: var(--audio-a-bg);
+    border-color: #28a745;
+}
+
+.btn-side-b {
+    background: var(--audio-b-bg);
+    border-color: #0066cc;
+}
+
+.btn-side-x {
+    background: var(--audio-x-bg);
+    border-color: #ffc107;
+}
+
+/* Active state for currently playing audio button — minimal for seamless transition */
+.btn-audio.active {
+    /* No visual indicator: keeps the same appearance as inactive buttons */
+    transform: none;
+    box-shadow: none;
+    border-width: 2px;
+}
+
+.btn-side-a.active {
+    box-shadow: none;
+}
+
+.btn-side-b.active {
+    box-shadow: none;
+}
+
+.btn-side-x.active {
+    box-shadow: none;
+}
+
+/* Global play/pause button — distinct from side buttons */
+.btn-play-pause {
+    min-width: 80px;
+    font-size: 1rem;
+    padding: 12px 16px;
+    border-width: 2px;
+    background: var(--accent-color);
+    color: #fff;
+    border-color: var(--accent-hover);
+}
+
+.btn-play-pause:hover {
+    background: var(--accent-hover);
+}
+
+/* ── Timeline / Scrubber ──────────────────────────────────────── */
+
+.timeline-container {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.scrub-slider {
+    flex: 1;
+    height: 8px;
+    cursor: pointer;
+}
+
+.time-display {
+    min-width: 130px;
+    text-align: right;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── Loop Controls ────────────────────────────────────────────── */
+
+.loop-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+}
+
+.loop-controls input[type="number"] {
+    width: 100px;
+}
+
+/* ── Answer Buttons ───────────────────────────────────────────── */
+
+.answer-buttons {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    margin-bottom: 16px;
+}
+
+.btn-answer {
+    min-width: 180px;
+    font-size: 1.2rem;
+    padding: 14px 28px;
+    background: var(--accent-color);
+    color: #fff;
+    border-color: var(--accent-color);
+}
+
+/* ── Trial Feedback ───────────────────────────────────────────── */
+
+.trial-feedback {
+    text-align: center;
+    padding: 16px;
+    margin-bottom: 12px;
+    border-radius: 6px;
+    background: var(--bg-secondary);
+}
+
+#feedbackText.correct {
+    color: var(--success-color);
+    font-weight: 700;
+}
+
+#feedbackText.incorrect {
+    color: var(--error-color);
+    font-weight: 700;
+}
+
+/* ── Statistics Area ──────────────────────────────────────────── */
+
+.stats-area {
+    margin-top: 24px;
+    padding: 16px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+}
+
+#statsTable {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+#statsTable td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+#statsTable td:first-child {
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+/* ── Export Area ──────────────────────────────────────────────── */
+
+.export-area {
+    display: flex;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+/* ── Diagnostics Section ──────────────────────────────────────── */
+
+.diagnostics-output {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 16px;
+    font-size: 0.85rem;
+    overflow-x: auto;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* ── Footer ───────────────────────────────────────────────────── */
+
+footer {
+    text-align: center;
+    padding: 16px;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    border-top: 1px solid var(--border-color);
+}
+
+/* ── Responsive Design ────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+    .toolbar {
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    main {
+        padding: 12px;
+    }
+
+    .form-row {
+        flex-direction: column;
+    }
+
+    .audio-buttons {
+        flex-direction: column;
+    }
+
+    .btn-audio {
+        min-width: auto;
+    }
+
+    .answer-buttons {
+        flex-direction: column;
+    }
+
+    .loop-controls {
+        flex-wrap: wrap;
+    }
+}
+
+/* ── Zoom Utility Classes (applied via JS) ────────────────────── */
+
+.zoom-75 #mainContent { font-size: 0.75rem; }
+.zoom-100 #mainContent { font-size: 1rem; }
+.zoom-125 #mainContent { font-size: 1.25rem; }
+.zoom-150 #mainContent { font-size: 1.5rem; }
+
+/* ── Animations ───────────────────────────────────────────────── */
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.pulse {
+    animation: pulse 1.5s ease-in-out infinite;
+}

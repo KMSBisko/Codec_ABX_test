@@ -1,0 +1,367 @@
+# Local Codec ABX Tester
+
+Language: English | [Tiếng Việt](#tiếng-việt)
+
+Desktop ABX tool for local codec listening tests with strict preprocessing and validation controls.
+
+## What This App Enforces
+
+- Input: WAV/FLAC (FLAC converted to WAV)
+- Sample-rate modes:
+  - Native sample-rate (default): keep source sample-rate as target
+  - Forced 48 kHz: explicit resample before any codec stage (prefer `soxr`, fallback to default engine if unavailable)
+- Offline codec pipeline:
+  - Side A and Side B each run their own stage pipeline (1 to 4 stages per side)
+  - Each stage: Encode -> decode -> pass PCM to next stage
+  - Stage count defaults to 1 for both sides (equivalent to classic single-stage ABX)
+  - No-op / Lossless passthrough stage is available for bit-identical pipeline hops
+  - Explicit sample-rate control (`-ar`) to avoid hidden conversion
+- Loudness:
+  - EBU R128 LUFS normalization target: `-16 LUFS`
+  - Normalization is applied once after full pipeline processing
+  - Gain-only normalization
+  - No-clipping guard (global attenuation if needed)
+- Validation checks before ABX:
+  - Same sample-rate for A/B
+  - Alignment lag estimate and compensation after full pipeline outputs
+  - Same effective length
+  - Loudness delta report (target < 0.1 dB)
+- Optional post-pipeline bandwidth limiting:
+  - Side A and Side B can be configured independently
+  - Cutoff per side: 14 kHz / 16 kHz / 18 kHz
+- ABX engine:
+  - Randomized X each trial
+  - Running score + one-tailed binomial p-value
+- Playback:
+  - Shared global timeline
+  - Scrub preserves alignment
+  - A/B/X switch uses a short click-suppression crossfade
+  - Device selection + exclusive mode request (WASAPI exclusive supported when available)
+- Logging:
+  - Export JSON/CSV results
+
+## Supported Codec Profiles
+
+Direct:
+- Lossless (Unprocessed Reference)
+- No-op / Lossless passthrough (pipeline stage)
+- Opus (`libopus`)
+- AAC (`aac`)
+- Ogg Vorbis (`libvorbis`)
+- SBC (`sbc` if your ffmpeg build supports it)
+- aptX (`aptx`)
+- aptX HD (`aptx_hd`)
+- LDAC (`libldac`, only if your ffmpeg build includes it)
+
+Fallback behavior:
+- Simulated profiles are no longer exposed as selectable UI options.
+- If `aptx`, `aptx_hd`, or `libldac` encoders are unavailable in your ffmpeg build,
+  the pipeline automatically falls back internally to AAC-based simulation at the selected bitrate.
+
+Additional bitrate notes:
+- Lower bitrate options are available for direct codecs (Opus/AAC/Ogg Vorbis/SBC) to stress-test artifact audibility.
+- Real aptX/aptX HD are configured to their typical constant-bitrate profiles (352/576 kbps).
+- For stability across ffmpeg builds, aptX/aptX HD are processed internally at 48 kHz, then resampled to the selected target sample-rate.
+- Real LDAC is available at 330/660/990 kbps when `libldac` is present.
+- Internal fallback simulation uses AAC bitrate-matched profiles for aptX/aptX HD/LDAC when needed.
+
+## Prerequisites
+
+1. Python 3.11+
+2. ffmpeg + ffprobe on PATH
+
+Check:
+
+```powershell
+ffmpeg -version
+ffprobe -version
+ffmpeg -hide_banner -encoders | Select-String -Pattern "aptx|ldac|libldac|libvorbis" -CaseSensitive:$false
+```
+
+## Install
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+## Run
+
+```powershell
+python run_abx.py
+```
+
+## Build A Single Windows EXE (No Python Needed For End Users)
+
+This project includes a PyInstaller setup for a one-file GUI executable.
+
+1. Put ffmpeg binaries in:
+  - `third_party/ffmpeg/bin/ffmpeg.exe`
+  - `third_party/ffmpeg/bin/ffprobe.exe`
+
+2. Build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/build_windows_exe.ps1
+```
+
+3. Share this file with users:
+  - `run_abx.exe`
+
+Notes:
+- End users do not need Python installed.
+- On first launch, some antivirus tools may scan the self-extracting exe.
+- If SmartScreen warns on unsigned apps, users may need to click "More info" -> "Run anyway".
+- Preprocess working files are created in the OS temp directory and are cleaned up automatically when preprocessing is cancelled/failed, replaced by a new preprocess run, or when the app closes.
+
+Build troubleshooting:
+- Run the build from a normal (non-admin) terminal.
+- If you previously hit `PermissionError` during packaging, close any app/process that may lock files (Explorer preview, antivirus scan in progress), then run the build script again.
+- The script now builds in a temporary OS folder, then keeps only `run_abx.exe` in project root.
+
+## Example Test File Included
+
+Generate bundled example input:
+
+```powershell
+python tools/generate_example_audio.py
+```
+
+This creates:
+- `examples/example_abx_input.wav`
+
+This example file is optional and is not required when distributing only `run_abx.exe`.
+
+## Basic Usage
+
+1. Select WAV/FLAC source.
+2. Choose sample-rate mode (Native or Forced 48 kHz).
+3. Configure Side A and Side B pipeline stages.
+  - Set **Stage count A** and **Stage count B** independently (1 to 4 each).
+  - Default is A=1 and B=1, which behaves like classic single-stage ABX.
+  - For each visible stage, choose codec and bitrate.
+  - You can use **No-op / Lossless passthrough** in any stage.
+  - You can enable optional bandwidth limit independently for A and B.
+  - Choose **A/B label mapping** mode:
+    - Fixed labels: Play A is Codec A, Play B is Codec B.
+    - Blinded labels: Play A/B mapping is randomized each trial (may stay same or swap).
+      To reduce deterministic behavior, swap probability increases gradually with no-change streak length.
+4. Click **Preprocess A/B** and verify status metrics.
+  - Use **Cancel Preprocess** to stop preprocessing while ffmpeg jobs are running.
+5. Select output device (enable exclusive mode if desired).
+6. Perform ABX trials with Play A/B/X and answer X=A or X=B.
+  - Use **Cancel ABX Session** to reset trial state and score.
+7. Use **Show/Refresh Diagnostics** to review in-app post-session details:
+  - A/B label mapping mode (non-revealing in top summary)
+  - Trial-by-trial X label/source, answer label/source, and correctness
+  - Whether mapping changed for the next trial
+  - Full mapping audit is placed in a lower section so it is not immediately visible
+8. Export results as JSON/CSV.
+
+## Notes On Experimental Validity
+
+- For strongest validity, keep all OS audio enhancements disabled.
+- Keep system volume fixed during the test.
+- Use wired output or known stable exclusive-mode path when possible.
+- A/B/X are rendered offline before trials to reduce runtime variability.
+
+## Temporary Working Files
+
+The app uses a temporary working directory for preprocessing intermediates.
+- The folder is not kept as a persistent session log.
+- It is cleaned up automatically when preprocessing is cancelled/failed, replaced by a new preprocess run, or when the app closes.
+- If the process is forcibly terminated (for example, a crash or kill), the OS may leave temp leftovers that can be safely deleted manually.
+
+See `app/main.py`.
+
+## Quick Check
+
+```powershell
+python -m compileall app run_abx.py
+```
+
+---
+
+## Tiếng Việt
+
+# Trình kiểm tra ABX Codec cục bộ
+
+Công cụ ABX desktop để kiểm tra nghe codec cục bộ với các ràng buộc tiền xử lý và kiểm định chặt chẽ.
+
+## Ứng dụng đảm bảo những gì
+
+- Đầu vào: WAV/FLAC (FLAC sẽ được chuyển sang WAV)
+- Chế độ tần số lấy mẫu:
+  - Native sample-rate (mặc định): giữ nguyên tần số lấy mẫu của nguồn
+  - Ép 48 kHz: resample rõ ràng trước mọi stage codec (ưu tiên `soxr`, tự fallback về engine mặc định nếu không khả dụng)
+- Pipeline codec offline:
+  - Nhánh A và nhánh B mỗi nhánh chạy pipeline stage riêng (1 đến 4 stage cho mỗi nhánh)
+  - Mỗi stage: Encode -> decode -> chuyển PCM sang stage tiếp theo
+  - Số stage mặc định là 1 cho cả hai nhánh (tương đương ABX single-stage cổ điển)
+  - Có stage No-op / Lossless passthrough để mô phỏng bước pipeline không làm biến đổi tín hiệu
+  - Kiểm soát tần số lấy mẫu rõ ràng (`-ar`) để tránh chuyển đổi ẩn
+- Loudness:
+  - Mục tiêu chuẩn hóa EBU R128 LUFS: `-16 LUFS`
+  - Chuẩn hóa chỉ áp dụng một lần sau khi hoàn tất toàn bộ pipeline
+  - Chuẩn hóa theo gain-only
+  - Chống clipping (giảm mức toàn cục nếu cần)
+- Kiểm định trước ABX:
+  - Cùng sample-rate cho A/B
+  - Ước lượng và bù lệch căn chỉnh sau khi có đầu ra pipeline cuối cùng
+  - Cùng độ dài hiệu dụng
+  - Báo chênh lệch loudness (mục tiêu < 0.1 dB)
+- Giới hạn băng thông sau pipeline (tùy chọn):
+  - Cấu hình độc lập cho nhánh A và nhánh B
+  - Điểm cắt mỗi nhánh: 14 kHz / 16 kHz / 18 kHz
+- ABX engine:
+  - X được random ở mỗi lượt
+  - Điểm số chạy + p-value nhị thức một phía
+- Playback:
+  - Timeline toàn cục dùng chung
+  - Scrub vẫn giữ căn chỉnh
+  - Chuyển A/B/X dùng crossfade ngắn để giảm click
+  - Chọn thiết bị + yêu cầu exclusive mode (WASAPI exclusive khi khả dụng)
+- Logging:
+  - Xuất kết quả JSON/CSV
+
+## Các profile codec được hỗ trợ
+
+Trực tiếp:
+- Lossless (Unprocessed Reference)
+- No-op / Lossless passthrough (pipeline stage)
+- Opus (`libopus`)
+- AAC (`aac`)
+- Ogg Vorbis (`libvorbis`)
+- SBC (`sbc`, nếu bản ffmpeg của bạn hỗ trợ)
+- aptX (`aptx`)
+- aptX HD (`aptx_hd`)
+- LDAC (`libldac`, chỉ khi bản ffmpeg của bạn có tích hợp)
+
+Hành vi fallback:
+- Các profile mô phỏng không còn hiển thị để chọn trực tiếp trong UI.
+- Nếu encoder `aptx`, `aptx_hd` hoặc `libldac` không có trong bản ffmpeg,
+  pipeline sẽ tự động fallback nội bộ sang mô phỏng dựa trên AAC theo đúng bitrate đã chọn.
+
+Ghi chú bitrate bổ sung:
+- Có thêm các mức bitrate thấp cho codec trực tiếp (Opus/AAC/Ogg Vorbis/SBC) để stress-test khả năng nghe ra artefact.
+- aptX/aptX HD thật được cấu hình theo profile CBR điển hình (352/576 kbps).
+- Để ổn định trên nhiều bản ffmpeg, aptX/aptX HD được xử lý nội bộ ở 48 kHz rồi resample về sample-rate mục tiêu đã chọn.
+- LDAC thật có các mức 330/660/990 kbps khi có `libldac`.
+- Fallback mô phỏng nội bộ dùng profile AAC khớp bitrate cho aptX/aptX HD/LDAC khi cần.
+
+## Yêu cầu trước khi chạy
+
+1. Python 3.11+
+2. ffmpeg + ffprobe trong PATH
+
+Kiểm tra:
+
+```powershell
+ffmpeg -version
+ffprobe -version
+ffmpeg -hide_banner -encoders | Select-String -Pattern "aptx|ldac|libldac|libvorbis" -CaseSensitive:$false
+```
+
+## Cài đặt
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+## Chạy ứng dụng
+
+```powershell
+python run_abx.py
+```
+
+## Build file EXE Windows (người dùng cuối không cần Python)
+
+Dự án này có cấu hình PyInstaller để tạo GUI executable one-file.
+
+1. Đặt binary ffmpeg tại:
+  - `third_party/ffmpeg/bin/ffmpeg.exe`
+  - `third_party/ffmpeg/bin/ffprobe.exe`
+
+2. Build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/build_windows_exe.ps1
+```
+
+3. Chia sẻ file này cho người dùng:
+  - `run_abx.exe`
+
+Ghi chú:
+- Người dùng cuối không cần cài Python.
+- Lần chạy đầu, một số phần mềm antivirus có thể quét file exe tự giải nén.
+- Nếu SmartScreen cảnh báo app chưa ký, người dùng có thể cần bấm "More info" -> "Run anyway".
+- File làm việc cho bước preprocess được tạo trong thư mục tạm của hệ điều hành và sẽ tự dọn khi preprocess bị hủy/thất bại, khi chạy preprocess mới, hoặc khi đóng ứng dụng.
+
+Khắc phục lỗi build:
+- Chạy lệnh build từ terminal thường (không cần quyền admin).
+- Nếu trước đó gặp `PermissionError` khi đóng gói, hãy đóng các tiến trình có thể đang khóa file (Explorer preview, antivirus đang quét), rồi chạy lại script build.
+- Script hiện build trong thư mục tạm của hệ điều hành, sau đó chỉ giữ lại `run_abx.exe` ở thư mục gốc dự án.
+
+## Có sẵn file test mẫu
+
+Tạo file đầu vào mẫu đi kèm:
+
+```powershell
+python tools/generate_example_audio.py
+```
+
+Lệnh này tạo:
+- `examples/example_abx_input.wav`
+
+File ví dụ này là tùy chọn và không cần thiết nếu bạn chỉ phát hành `run_abx.exe`.
+
+## Cách sử dụng cơ bản
+
+1. Chọn nguồn WAV/FLAC.
+2. Chọn chế độ tần số lấy mẫu (Native hoặc Ép 48 kHz).
+3. Cấu hình các stage pipeline cho nhánh A và nhánh B.
+  - Đặt **Stage count A** và **Stage count B** độc lập (1 đến 4 cho mỗi nhánh).
+  - Mặc định là A=1 và B=1, hành vi giống ABX single-stage cổ điển.
+  - Với mỗi stage hiển thị, chọn codec và bitrate.
+  - Bạn có thể dùng **No-op / Lossless passthrough** ở bất kỳ stage nào.
+  - Bạn có thể bật giới hạn băng thông độc lập cho A và B.
+  - Chọn chế độ **A/B label mapping**:
+    - Fixed labels: Play A là Codec A, Play B là Codec B.
+    - Blinded labels: ánh xạ Play A/B được random theo từng lượt (có thể giữ nguyên hoặc đổi).
+      Để giảm tính quyết định, xác suất đổi sẽ tăng dần theo chuỗi lượt không đổi ánh xạ.
+4. Bấm **Preprocess A/B** và kiểm tra các chỉ số trạng thái.
+  - Dùng **Cancel Preprocess** để dừng tiền xử lý khi các job ffmpeg đang chạy.
+5. Chọn thiết bị phát (bật exclusive mode nếu cần).
+6. Thực hiện ABX với Play A/B/X và trả lời X=A hoặc X=B.
+  - Dùng **Cancel ABX Session** để reset lượt và điểm.
+7. Dùng **Show/Refresh Diagnostics** để xem chẩn đoán sau phiên trong app:
+  - Chế độ ánh xạ nhãn A/B (phần tóm tắt trên cùng không lộ đáp án)
+  - Theo từng lượt: nhãn X/source, nhãn trả lời/source, đúng/sai
+  - Trạng thái ánh xạ có đổi cho lượt tiếp theo hay không
+  - Mapping audit đầy đủ được đặt ở phần thấp hơn để tránh nhìn thấy ngay lập tức
+8. Xuất kết quả JSON/CSV.
+
+## Ghi chú về tính hợp lệ thực nghiệm
+
+- Để kết quả đáng tin hơn, nên tắt toàn bộ hiệu ứng âm thanh của hệ điều hành.
+- Giữ âm lượng hệ thống cố định trong suốt bài test.
+- Ưu tiên đường phát có dây hoặc đường exclusive mode ổn định.
+- A/B/X được render offline trước khi làm bài để giảm biến thiên thời gian chạy.
+
+## File làm việc tạm thời
+
+Ứng dụng dùng thư mục tạm để chứa file trung gian khi preprocess.
+- Thư mục này không được giữ như session log lâu dài.
+- Ứng dụng sẽ tự dọn khi preprocess bị hủy/thất bại, khi chạy preprocess mới, hoặc khi đóng ứng dụng.
+- Nếu tiến trình bị kết thúc cưỡng bức (ví dụ crash/kill), hệ điều hành có thể để lại file tạm; bạn có thể xóa thủ công an toàn.
+
+Xem `app/main.py`.
+
+## Kiểm tra nhanh
+
+```powershell
+python -m compileall app run_abx.py
+```

@@ -23,17 +23,18 @@ Phase 0 and 0b are done, plus Phase 1 items 1 and 2 (canary gate, null gate),
 Phase 2 (study lifecycle), and Phase 3 (shared audio preparation).
 Phase 2 and Phase 3 are committed together, at the user's request, as
 `Phase 2/3: bounded studies and shared audio preparation`, following `4da8fb7`
-(`Phase 1:`). Use `git log -1` for the exact revision. The refreshed
-[HANDOVER_PROMPT.md](HANDOVER_PROMPT.md) is the next-session entry point: honest
-CI coverage and a reproducible playback acceptance kit, with actual listening
-still requiring an authorized runtime and a human operator.
+(`Phase 1:`). The verification pass below (CI honesty + playback acceptance
+kit + headless dry run) is committed as `Phase 3 follow-up: CI honesty and
+playback acceptance kit`. Use `git log -1` for the exact revision. The refreshed
+[HANDOVER_PROMPT.md](HANDOVER_PROMPT.md) is the next-session entry point:
+execute the ear rows with an authorized runtime and a human operator, then
+per-session web state.
 
-- **274 tests pass** (177 before Phase 2, +60 lifecycle tests, +37 Phase 3
-  preparation tests). Phase 3 adds 14 backend-free preparation/measurement tests,
-  7 preparation/lifecycle route tests, and 16 real-audio parity/measurement
-  regressions. **29** of the 274 are `-m pipeline` (ffmpeg); **245** are
-  non-pipeline. The browser/desktop UI remains covered by static contracts,
-  not execution or listening.
+- **290 pytest tests** (288 before the playback fixes, +2 runtime-suite/CI
+  checks). **29** are `-m pipeline` (ffmpeg); **261** are non-pipeline.
+  The runtime check executes **16 Node subtests** against real client functions
+  with fake DOM/Web Audio/network boundaries. This is not browser execution or
+  listening; desktop UI coverage remains static/shim-based.
 - `core/` is the single source of truth for statistics, blinding, alignment,
   **validity gates**, **the study lifecycle** and report wording, shared by the
   PyQt6 desktop and Flask web shells.
@@ -115,6 +116,9 @@ still requiring an authorized runtime and a human operator.
 | Web served-audio mapping (A/B/X judged **from the bytes served**, 16-trial perfect listener scored entirely from audio, calibration pair follows the mapping, `/api/audio/info` publishes the cache identity) | verified by tests against real WAV bytes |
 | Browser client lifecycle wiring (per-trial buffer cache, stop at N, seal control, redaction note) | **UNVERIFIED in a browser.** No page was opened, no audio was played; `node --check` passes and the contract is asserted statically in `tests/test_web_client_lifecycle.py` |
 | Desktop lifecycle wiring (seal button, N/canary freeze, score panel, export stamps, prepared-audio hash, export guard) | **UNVERIFIED — the app cannot be launched here** (`libGL.so.1`). `app/main.py` parses, its i18n keys are parity-checked, and its structure is asserted in `tests/test_desktop_lifecycle_ui.py`; `ABXStats` fields it reads are checked through the shim |
+| CI pipeline job installs audio extras, propagates failures, and refuses an empty/skipped suite | contract tests observed red→green; junit checker exercised locally: real ffmpeg run 29/0/0 green, missing dep → all-skipped red, broken package red. **GitHub Actions itself has never run here** (no remote) |
+| Playback acceptance kit material (determinism, channel routing, pair bands, byte-identical null pair, canary recipe, loop seam) | verified by byte-level tests (`tests/test_playback_kit.py`); the kit is inputs, not a playback claim |
+| Headless dry run of checklist rows 8/9/10/11/12/13 over the live server | **executed 2026-10-21**, 7/7 pass, evidence in `playback_kit/dryrun_evidence/`. Server-only: no browser, no ears — certifies the API surface, not playback |
 | Real playback of the correctly-mapped audio by a human ear | **never performed** — the web inversion is proven on served bytes, not on heard sound |
 | **Desktop app has never been executed** | **UNVERIFIED.** Needs `libgl1` + `libportaudio2`. `main.py` is compile-checked; its logic is tested through the shim, not run |
 | Web single-session limitation | documented, **not fixed** |
@@ -186,6 +190,12 @@ Each has a test. Do not "simplify" these away:
   run that must stay exportable. → the guard reads `engine.all_trials()`.
 - **Streak-based blinding was predictable.** web `0.1*streak` cap 0.5; desktop
   `0.5 + 0.07*streak` cap **0.88** — above 50% the mapping is anti-persistent.
+- **Web answered an out-of-band answer with a 500.** `POST /api/trial/answer`
+  with no trial in flight (e.g. scripted client after a gated 409 on start) hit
+  the engine's `RuntimeError("no trial in progress")`, which the route did not
+  translate: unstructured 500 HTML. Found by the headless dry run; the route
+  now answers 409 in the engine's words. →
+  `tests/test_study_lifecycle.py::test_web_answer_with_no_trial_in_flight_is_409_not_a_500`.
 - Metric conventions that were traps: perfect null returned `+inf` (deepest null
   printed as the biggest number); Clopper-Pearson lower bound inverted; the pass
   threshold exposed a peeking criterion.
@@ -204,11 +214,19 @@ Each has a test. Do not "simplify" these away:
 ## Commands
 
 ```bash
-.venv/bin/python -m pytest -q                    # 274 passed (ffmpeg present)
-.venv/bin/python -m pytest -q -m "not pipeline"  # 245 passed, 29 deselected
-.venv/bin/python -m pytest -q -m pipeline        # 29 passed, 245 deselected; audio deps required
-.venv/bin/python -m compileall -q core app web tests
-~/.local/bin/node --check web/static/js/app.js   # the web shell has no JS test runner
+.venv/bin/python -m pytest -q                    # 290 tests; ffmpeg + Node present
+.venv/bin/python -m pytest -q -m "not pipeline"  # 261 tests, 29 deselected
+.venv/bin/python -m pytest -q -m pipeline        # 29 tests, 261 deselected; audio deps required
+.venv/bin/python -m compileall -q core app web tests tools
+node --check web/static/js/app.js
+node --test tests/js/web_playback.test.cjs       # 16 runtime regressions; fake Web Audio, NOT ears
+
+.venv/bin/python tools/make_playback_kit.py      # deterministic kit -> playback_kit/
+.venv/bin/python -m pytest -q tests/test_ci_contract.py  # CI contract guards
+
+# headless dry run (server start requires explicit user authorization):
+FLASK_DEBUG=0 .venv/bin/python -m web.app        # http://localhost:5000
+.venv/bin/python tools/playback_dry_run.py       # rows 8-13 API-observable; NOT playback
 ```
 
 ## Phase 1 — status and order
@@ -352,6 +370,92 @@ an RMS approximation). The legacy `true_peak_dbfs` field is a **sample peak**, n
 an oversampled true peak; the disclosure now names this limitation. No validity
 threshold was loosened, and no previous assertion was weakened.
 
+## Verification pass — honest CI + playback acceptance kit (DONE, NOT committed)
+
+**CI contract.** The `pipeline-smoke` job previously installed only dev deps
+(so every pipeline module import-skipped) and ran pytest under
+`|| echo "pipeline suite pending"` — a green job verifying nothing. It now
+installs `requirements-audio.txt`, runs `-m pipeline` with the exit code
+propagating, and judges the run by a junit summary: **empty, skipped or
+failing → job fails**. The core matrix pins `-m "not pipeline"` explicitly and
+stays Qt/audio-backend-free. `tests/test_ci_contract.py` (5 guards, text-based
+so it runs in the lightweight matrix) was **observed red against the old
+workflow** (4/5 failing on masking, missing audio deps, vacuous suite) and
+green after the fix. The junit checker was exercised locally three ways: real
+run → `29 tests, 0 skipped, 0 failed` green; missing pyloudnorm → all-skipped
+→ **red**; broken package → collection errors → **red**. **GitHub Actions
+itself has never run** (no remote is configured); local CI-simulation is not a
+CI run.
+
+**Playback acceptance kit.** `tools/make_playback_kit.py` (numpy-only, pinned
+seed) emits deterministic PCM16 material for every checklist row: mono
+identify, L-then-R channel routing with a shared t=0 click, A/B pair differing
+only by a 12 kHz vs 6 kHz shimmer, a byte-identical null pair, a canary pair
+built by the app's OWN `core.canary` recipe, a click-and-fade loop-seam file,
+`manifest.txt` (sha256) and `ANSWER_KEY.md` that must be opened only after
+sealing — the offline analogue of the redacted mid-run export. Output is
+gitignored under `playback_kit/`. `tests/test_playback_kit.py` (8 tests)
+judges the written bytes: determinism, formats, channel dominance, band
+differences, byte-identity, clip level, loop seam. `PLAYBACK_ACCEPTANCE.md` is
+the operator checklist (13 rows + desktop D1/D2), each row naming what it
+needs (ears/browser/files) and what is already machine-proved, with an
+evidence log that must not be prefilled.
+
+**Headless dry run — EXECUTED 2026-10-21 (server YES, browser NO, ears NO).**
+User authorization covered starting the Flask server (`python -m web.app`,
+port 5000, since stopped). `tools/playback_dry_run.py` drove the live API over
+kit material: rows 9 (null gate `passed`), 11 (config frozen 409), 12
+(mid-run export redacted, every `x_source` null), 13a (seal verifiable,
+`SEALED`, not final), 10 (past-N start refused 409), 13b (completed,
+`is_final`, `significant_verdict`), 8 (failed canary → 409 + `run_valid=false`
++ VOID export) — **7/7 pass**, evidence in `playback_kit/dryrun_evidence/`.
+This is NOT playback validation: no sound was heard, no page opened. Ear rows
+0–7 and the browser observations of 8–13 stay **NOT RUN**.
+
+**Bug found and fixed by the dry run:** answering with no trial in flight
+(e.g. after a gated 409 on start) escaped the route as an unstructured HTTP
+500 (`RuntimeError: no trial in progress`). The route now returns 409 with the
+engine's words; regression `test_web_answer_with_no_trial_in_flight_is_409_not_a_500`
+observed red (500 crash) before the fix. Method note: canary X is a fair coin
+per trial, so a headless client must judge the calibration answer from the
+post-answer feedback — the known-answer property is perceptual, which is
+exactly why the ear rows cannot be automated.
+
+**Local verification this pass:** 288 passed (99 s); `-m "not pipeline"` 259
+passed, 29 deselected (14 s); `-m pipeline` 29 passed, 259 deselected (74 s);
+`compileall` over core/app/web/tests/tools, `node --check`, `git diff --check`
+all pass. No browser, no desktop launch, no listening, no system installation.
+
+## Playback runtime fixes — uncommitted
+
+The review found two client bugs missed by static contracts. Executable Node
+regressions were added first: **10 of the original 13 subtests failed** against
+the old client (three preserved-behavior checks passed), before either fix.
+
+- Live A→B/X switching played the chosen buffer without saving `currentSide`;
+  scrub/resume then silently returned to A. `startSource` now records the side
+  alongside the source, so every restart shares one selection owner.
+- Auto-advance restarted the old X before fetching the next token. Changing the
+  cached buffers never changed the already-playing source. `startNewTrial` now
+  rebinds the selected side only after loading next-trial A/B/X; the premature
+  restart in `submitAnswer` is removed. This covers A/B blind swaps and the
+  canary→normal transition too, preserving timeline/loop and paused/idle state.
+
+The [JavaScript suite](<tests/js/web_playback.test.cjs>) now has **16 passing
+runtime subtests**, including slow loading, pausing during loading, fixed-map
+cache reuse and stopping at N. The [pytest bridge](<tests/test_web_playback_runtime.py>)
+runs them under pytest and checks Node CI setup. The lightweight CI matrix installs Node 22; a missing Node locally skips
+only the runtime check, while a missing Node in CI fails. No npm dependencies.
+
+Local verification: **290 pytest tests passed** (87.34 s), including the 16 Node
+subtests via the pytest bridge. JavaScript syntax, Python compilation and
+`git diff --check` passed. GitHub Actions itself was not run.
+
+These fakes prove buffer/source ownership, **not browser/audio-device behavior**.
+No browser/server was started and no sound was heard in this fix pass. The
+separately identified loading-error fail-open path and crossfade stop scheduling
+remain outside these two fixes; do not infer seamless or failure-safe playback.
+
 ## Open items / non-goals
 
 - Sealing a run is destructive to the session's in-memory trials: the web seal
@@ -374,10 +478,14 @@ threshold was loosened, and no previous assertion was weakened.
   difference, but the exported canary measurement is not a reread of both files.
   This is separate from post-normalization LUFS/null measurements, which now
   do use the delivered PCM.
-- CI still masks failures with `|| echo` and lacks the audio-test dependencies;
-  local pipeline verification below must not be mistaken for CI coverage.
-- The next recommended task is real playback/listening validation, including a
-  canary, channel routing, instantaneous switches and a sealed export. After
-  that: per-session web state, output-path/Bluetooth disclosure, reproducible
-  study specifications/provenance, Holm wiring, then README/DESIGN refresh.
+- CI coverage is now honest (audio extras installed, failures propagate,
+  empty/skipped suite fails the job) and contract-guarded — but **GitHub
+  Actions has never actually run**: no remote is configured, so real CI
+  evidence does not exist yet.
+- The next recommended task is **executing the ear rows** of
+  `PLAYBACK_ACCEPTANCE.md` (0–7, plus the browser-side observations of 8–13)
+  with an authorized runtime and a human operator; the kit, the API dry run
+  and the machine-proved half already exist. After that: per-session web
+  state, output-path/Bluetooth disclosure, reproducible study
+  specifications/provenance, Holm wiring, then README/DESIGN refresh.
 - No git remote is configured; everything is local on `master`.

@@ -224,6 +224,11 @@ desktop and web shells and imports nothing beyond the standard library and
 numpy. `tests/test_core_discipline.py` enforces that, so the two engines cannot
 silently diverge again.
 
+Client playback regressions execute the real JavaScript with fake DOM/Web Audio
+boundaries (no browser or sound). Install Node.js 22+ to include them in pytest;
+CI requires it. Run them directly with `node --test tests/js/web_playback.test.cjs`.
+These tests do not replace human playback acceptance.
+
 Known headless gaps: the desktop app needs the `libgl1` and `libportaudio2`
 system packages on top of the Python requirements.
 

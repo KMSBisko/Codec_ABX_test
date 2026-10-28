@@ -1024,6 +1024,9 @@ function startSource(side, buffer, playOffset, loopEnabled, loopStart, loopEnd) 
 
     // Update currentSource BEFORE assigning onended so the guard check works correctly
     state.currentSource = source;
+    // The playing source owns the selected side too: scrubbing and resuming
+    // must not fall back to the side that happened to be selected while idle.
+    state.currentSide = side;
     state.gainNode = gainNode;
     state.playbackStartTime = now;
     state.playbackOffset = playOffset;
@@ -1273,6 +1276,13 @@ async function startNewTrial() {
             console.error("X buffer preload failed:", e);
         }
 
+        // Updating a cached AudioBuffer does not change a source already
+        // playing it. Rebind AFTER this trial's A/B/X have loaded, for every
+        // side (blind swaps and the canary→normal transition change A/B too).
+        // switchSide preserves/wraps the shared timeline; paused/idle playback
+        // must stay paused/idle and will pick up these buffers on next play.
+        if (state.isPlaying) switchSide(state.currentSide);
+
         updateStatsDisplay();
         clearGateBanner();
 
@@ -1403,38 +1413,8 @@ async function submitAnswer(answer) {
         // to close -- so the bound is enforced in core, and the UI obeys it.
         const runOver = result.stats && result.stats.can_accept_answers === false;
         if (state.autoAdvanceEnabled && !runOver) {
-            // If currently playing X, switch to the new X automatically so audio keeps flowing
-            if (state.isPlaying && state.currentSide === "x") {
-                const buffer = getBufferForSide("x");
-                if (buffer) {
-                    const ctx = state.audioContext;
-                    const now = ctx.currentTime;
-                    const fadeDuration = 256 / ctx.sampleRate;
-
-                    // Fade out old source
-                    if (state.gainNode) {
-                        state.gainNode.gain.cancelScheduledValues(now);
-                        state.gainNode.gain.setValueAtTime(state.gainNode.gain.value, now);
-                        state.gainNode.gain.linearRampToValueAtTime(0, now + fadeDuration);
-                    }
-
-                    const oldSource = state.currentSource;
-                    try { oldSource.stop(now + fadeDuration + 0.01); } catch (_) {}
-
-                    // Restart X at current timeline position with the new underlying buffer
-                    let playOffset = getCurrentTimelinePosition();
-                    const loopEnabled = document.getElementById("loopEnabled").checked;
-                    let loopStartVal = parseFloat(document.getElementById("loopStart").value) || 0;
-                    let loopEndVal = parseFloat(document.getElementById("loopEnd").value) || buffer.duration;
-
-                    if (loopEnabled && playOffset >= loopEndVal) {
-                        playOffset = loopStartVal + (playOffset - loopStartVal) % (loopEndVal - loopStartVal);
-                    }
-
-                    startSource("x", buffer, playOffset, loopEnabled, loopStartVal, loopEndVal);
-                }
-            }
-
+            // startNewTrial owns the audio handoff, after the next token's
+            // buffers load. Restarting here would replay the previous X.
             // Start next trial FIRST (hides feedback), then show previous trial's result
             // This avoids the flash: feedback is hidden → shown in one smooth transition
             await startNewTrial();

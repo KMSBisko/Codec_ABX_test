@@ -517,6 +517,21 @@ def test_web_config_refuses_active_run_edits(client):
     assert stats["total_trials"] == 1, "the recorded answers survived the refused edit"
 
 
+def test_web_answer_with_no_trial_in_flight_is_409_not_a_500(client):
+    """Reproduced headless (server dry run, 2026-10-21): the engine's core
+    contract is `RuntimeError: no trial in progress` when a client answers out
+    of band (e.g. after a gated 409 on start). The route translated
+    ValueError and StudyLifecycleError but let RuntimeError through, so the
+    HTTP surface crashed with an unstructured 500 HTML page."""
+    resp = client.post("/api/trial/answer", json={"answer": "A"})
+    assert resp.status_code == 409, (
+        "no trial staged: the answer must be refused in the engine's words, "
+        "not answered with a server crash"
+    )
+    body = json.loads(resp.data)
+    assert body["error"]
+
+
 def test_web_config_refuses_label_mode_edits_mid_run(client):
     client.post("/api/config", json={"planned_trials": 8, "label_mapping_mode": "fixed"})
     _start(client)

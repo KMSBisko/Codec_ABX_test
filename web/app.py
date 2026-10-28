@@ -1184,6 +1184,14 @@ def submit_answer():
             payload["error"] = str(exc)
             payload["reasons"] = list(exc.reasons) or payload["reasons"]
             return jsonify(payload), 409
+        except RuntimeError as exc:
+            # Core contract: answering with no trial in flight (e.g. after a
+            # gated 409 on start) is a lifecycle refusal, not a crash. A
+            # scripted client must never see an unstructured 500 here.
+            payload = _lifecycle_replay_payload()
+            payload["error"] = str(exc)
+            payload["reasons"] = payload["reasons"] or ["no trial in progress"]
+            return jsonify(payload), 409
 
     return jsonify({
         # Legacy row shape plus `kind`: the answer feedback names the trial as

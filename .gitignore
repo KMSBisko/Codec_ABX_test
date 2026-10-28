@@ -11,5 +11,6 @@ dist/
 uploads/*
 !uploads/.gitkeep
 examples/*.wav
+playback_kit/
 *.egg-info/
 .DS_Store
